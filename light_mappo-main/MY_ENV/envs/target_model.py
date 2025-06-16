@@ -169,15 +169,6 @@ def observe_Fov(model, trajectories):
                 noisy_obs[1] = noisy_obs[1] % 360
                 # observed_targets.append(noisy_obs)
                 z_polar[t].append(noisy_obs)
-
-        # # 处理观测角度规范化
-        # if observed_targets:
-        #     obs_array = np.column_stack(observed_targets)
-        #     # 方位角规范化到[0,360]度
-        #     obs_array[1, obs_array[1, :] < 0] += 360   #选出第一行中所有小于0的元素
-        #     obs_array[1, obs_array[1, :] > 360] -= 360
-        # else:
-        #     obs_array = np.empty((2, 0))
         
         # 生成杂波（圆形均匀分布）
         clutter = generate_clutter_2d(x_agent, y_agent, obverser_d, Zr)

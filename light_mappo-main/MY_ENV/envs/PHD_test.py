@@ -2,8 +2,8 @@ import numpy as np
 import random
 import matplotlib.pyplot as plt
 
-from target_model import model, targets, target_CV, observe_Fov
-from target_model import generate_clutter_2d, polar2dicaer
+from MY_ENV.envs.target_model import model, targets, target_CV, observe_Fov
+from MY_ENV.envs.target_model import generate_clutter_2d, polar2dicaer
 from PHD import PHD
 from PHD import State_extraction
 
@@ -24,9 +24,6 @@ state = [
     0                       # 粒子数量
 ]
 
-# print(Z_dicaer[0])
-# print(Z_dicaer[1])
-# print(z_polar[2])
 for i in range(2, 100):
     phd = PHD(model_data, Z_dicaer[i - 2], Z_dicaer[i - 1], z_polar[i], state)  # 调用PHD函数进行处理
     X_now = phd.predict_update()

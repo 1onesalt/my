@@ -1,6 +1,6 @@
 import numpy as np
 
-from MY_ENV.target_search import target_search
+from MY_ENV.envs.target_search import target_search
 
 class EnvCore(object):
     """
