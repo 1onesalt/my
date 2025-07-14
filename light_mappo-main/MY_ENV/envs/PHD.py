@@ -361,7 +361,7 @@ class PHD():
                 X_now.sort(key=lambda x: x['w'], reverse=True)
                 X_now = X_now[:Jmax]
             
-            return X_now
+            return X_now, cov
             
             # ------- 最终输出赋值 -------
 

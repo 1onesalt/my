@@ -17,20 +17,17 @@ def model(x_agent, y_agent):
 
     return model
 
-def targets(num_of_scans=100):
-    targets_birth_time = [1, 1, 1, 20, 20, 20]
-    targets_birth_time = (np.array(targets_birth_time) - 1).tolist()
-    targets_death_time = [
-                          num_of_scans, num_of_scans, num_of_scans, num_of_scans, num_of_scans,
+def targets(n_target, x_range=(-500, 500), y_range=(-500, 500), v_range=(-10, 10), num_of_scans=100):
+    targets_birth_time = np.random.randint(0, num_of_scans // 5, size=n_target).tolist()
+    targets_death_time = [num_of_scans, num_of_scans, num_of_scans, num_of_scans, num_of_scans,
                           num_of_scans]
-    targets_start = [np.array([0., 0., 0., -10.]),
-                     np.array([400., -10., -600., 5.]),
-                     np.array([-800., 20., -200., -5.]),
-
-                     np.array([400., -7., -600., -4.]),
-                     np.array([400., -2.5, -600., 10.]),
-                     np.array([0., 7.5, 0., -5.]),
-                    ]
+    targets_start = []
+    for _ in range(n_target):
+        x = np.random.uniform(*x_range)
+        vx = np.random.uniform(*v_range)
+        y = np.random.uniform(*y_range)
+        vy = np.random.uniform(*v_range)
+        targets_start.append(np.array([x, vx, y, vy]))
     return targets_birth_time, targets_death_time, targets_start
 
 def target_CV(targets_birth_time, targets_death_time, targets_start, step, x_min, x_max, y_min, y_max, 
