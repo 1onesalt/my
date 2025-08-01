@@ -14,10 +14,10 @@ class RMAPPOPolicy:
     """
     MAPPO Policy  class. Wraps actor and critic networks to compute actions and value function predictions.
 
-    :param args: (argparse.Namespace) arguments containing relevant model and policy information.
-    :param obs_space: (gym.Space) observation space.
-    :param cent_obs_space: (gym.Space) value function input space (centralized input for MAPPO, decentralized for IPPO).
-    :param action_space: (gym.Space) action space.
+    :param args: (argparse.Namespace) 包含相关模型和策略信息的参数。       arguments containing relevant model and policy information.
+    :param obs_space: (gym.Space) 观测空间。                             observation space. 
+    :param cent_obs_space: (gym.Space) 它接收的状态信息的维度和结构，通常由 gym.Space(例如 Box 或 Dict)描述  value function input space (centralized input for MAPPO, decentralized for IPPO).
+    :param action_space: (gym.Space) 动作空间                            action space.
     :param device: (torch.device) specifies the device to run on (cpu/gpu).
     """
 
@@ -32,9 +32,10 @@ class RMAPPOPolicy:
         self.share_obs_space = cent_obs_space
         self.act_space = act_space
 
-        self.actor = R_Actor(args, self.obs_space, self.act_space, self.device)
-        self.critic = R_Critic(args, self.share_obs_space, self.device)
+        self.actor = R_Actor(args, self.obs_space, self.act_space, self.device) #负责观测生成动作
+        self.critic = R_Critic(args, self.share_obs_space, self.device)         #负责观测生成价值函数
 
+        #初始化优化器
         self.actor_optimizer = torch.optim.Adam(self.actor.parameters(),
                                                 lr=self.lr, eps=self.opti_eps,
                                                 weight_decay=self.weight_decay)
@@ -45,7 +46,7 @@ class RMAPPOPolicy:
 
     def lr_decay(self, episode, episodes):
         """
-        Decay the actor and critic learning rates.
+        Decay the actor and critic learning rates.     对 Actor 和 Critic 的学习率进行线性衰减
         :param episode: (int) current training episode.
         :param episodes: (int) total number of training episodes.
         """
@@ -55,7 +56,8 @@ class RMAPPOPolicy:
     def get_actions(self, cent_obs, obs, rnn_states_actor, rnn_states_critic, masks, available_actions=None,
                     deterministic=False):
         """
-        Compute actions and value function predictions for the given inputs.
+        用于训练时生成动作和值函数预测,同时返回Actor和Critic的输出(这里的预测主要是指)
+        根据输入的观测，计算动作和值函数预测  Compute actions and value function predictions for the given inputs.
         :param cent_obs (np.ndarray): centralized input to the critic.
         :param obs (np.ndarray): local agent inputs to the actor.
         :param rnn_states_actor: (np.ndarray) if actor is RNN, RNN states for actor.
@@ -65,11 +67,12 @@ class RMAPPOPolicy:
                                   (if None, all actions available)
         :param deterministic: (bool) whether the action should be mode of distribution or should be sampled.
 
-        :return values: (torch.Tensor) value function predictions.
-        :return actions: (torch.Tensor) actions to take.
-        :return action_log_probs: (torch.Tensor) log probabilities of chosen actions.
+        :return values: (torch.Tensor) 值函数预测 value function predictions.
+        :return actions: (torch.Tensor) 生成的动作 actions to take.
+        :return action_log_probs: (torch.Tensor) 动作的对数概率 log probabilities of chosen actions.
         :return rnn_states_actor: (torch.Tensor) updated actor network RNN states.
         :return rnn_states_critic: (torch.Tensor) updated critic network RNN states.
+        函数设计动机：用于训练时的前向传播
         """
         actions, action_log_probs, rnn_states_actor = self.actor(obs,
                                                                  rnn_states_actor,
@@ -82,12 +85,14 @@ class RMAPPOPolicy:
 
     def get_values(self, cent_obs, rnn_states_critic, masks):
         """
-        Get value function predictions.
+        仅计算值函数预测(用于 Critic)  Get value function predictions.   会单独训练Critic吗
         :param cent_obs (np.ndarray): centralized input to the critic.
         :param rnn_states_critic: (np.ndarray) if critic is RNN, RNN states for critic.
         :param masks: (np.ndarray) denotes points at which RNN states should be reset.
 
         :return values: (torch.Tensor) value function predictions.
+
+        函数设计动机：用于某些需要仅获取值函数的情况，如计算目标值（target value），更新 GAE（Generalized Advantage Estimation）
         """
         values, _ = self.critic(cent_obs, rnn_states_critic, masks)
         return values
@@ -95,6 +100,7 @@ class RMAPPOPolicy:
     def evaluate_actions(self, cent_obs, obs, rnn_states_actor, rnn_states_critic, action, masks,
                          available_actions=None, active_masks=None):
         """
+        用于 Actor 的更新，评估当前策略对给定动作的概率分布和熵，同时返回 Critic 的值函数预测
         Get action logprobs / entropy and value function predictions for actor update.
         :param cent_obs (np.ndarray): centralized input to the critic.
         :param obs (np.ndarray): local agent inputs to the actor.
@@ -122,6 +128,7 @@ class RMAPPOPolicy:
 
     def act(self, obs, rnn_states_actor, masks, available_actions=None, deterministic=False):
         """
+        根据输入的观测，生成动作（用于环境交互）
         Compute actions using the given inputs.
         :param obs (np.ndarray): local agent inputs to the actor.
         :param rnn_states_actor: (np.ndarray) if actor is RNN, RNN states for actor.

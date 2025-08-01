@@ -13,7 +13,10 @@ from envs.env_core import EnvCore
 
 class DiscreteActionEnv(object):
     """
-    对于离散动作环境的封装
+    对于离散动作环境的封装，为什么要封装？
+    1、之后我们需要符合opengym的格式,告诉环境我的动作空间应该长什么样子,方便之后的网络拿到动作空间的参数,
+    然后去设置网络输出需要多少个神经元
+    2、拿到obd观测的参数,去设计网络输入的参数
     Wrapper for discrete action environment.
     """
 
@@ -25,6 +28,7 @@ class DiscreteActionEnv(object):
         self.signal_action_dim = self.env.action_dim
 
         # if true, action is a number 0...N, otherwise action is a one-hot N-dimensional vector
+        #注意一下这两个参数
         self.discrete_action_input = False
 
         self.movable = True
@@ -38,13 +42,13 @@ class DiscreteActionEnv(object):
         total_action_space = []
         for agent_idx in range(self.num_agent):
             # physical action space
-            u_action_space = spaces.Discrete(self.signal_action_dim)  # 5个离散的动作
+            u_action_space = spaces.Discrete(self.signal_action_dim)  #Discrete函数获取 5个离散的动作
 
-            # if self.movable:
+            # if self.movable:  #movable这个参数是把每个动作空间加到一起
             total_action_space.append(u_action_space)
 
-            # total action space
-            # if len(total_action_space) > 1:
+            # total action space  可能需要写一下
+            # if len(total_action_space) > 1:  #这里为了方便拿到动作空间和观测参数
             #     # all action spaces are discrete, so simplify to MultiDiscrete action space
             #     if all(
             #         [
@@ -59,11 +63,11 @@ class DiscreteActionEnv(object):
             #         act_space = spaces.Tuple(total_action_space)
             # self.action_space.append(act_space)
             # else:
-            self.action_space.append(total_action_space[agent_idx])
+            self.action_space.append(total_action_space[agent_idx])  #为每个智能体定义了动作空间
 
             # observation space
             share_obs_dim += self.signal_obs_dim
-            self.observation_space.append(
+            self.observation_space.append(  #也可以写一个字典，主要要明白代码在干一件什么样的事情
                 spaces.Box(
                     low=-np.inf,
                     high=+np.inf,

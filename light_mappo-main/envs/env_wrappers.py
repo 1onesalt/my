@@ -11,8 +11,8 @@ import numpy as np
 # single env
 class DummyVecEnv():
     def __init__(self, env_fns):
-        self.envs = [fn() for fn in env_fns]
-        env = self.envs[0]
+        self.envs = [fn() for fn in env_fns]   #创建env_fns歌环境
+        env = self.envs[0]                     #这里没有并行
         self.num_envs = len(env_fns)
         self.observation_space = env.observation_space
         self.share_observation_space = env.share_observation_space

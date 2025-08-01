@@ -25,39 +25,38 @@ from envs.env_wrappers import DummyVecEnv
 
 """Train script for MPEs."""
 
+#先到return DummyVecEnv，DummyVecEnv调用get_env_fn(i)函数才进入，进入后return init_env 并没有实例化函数
+#因此是先直接跳过，最终env是通过传入的参数get_env_fn(i)来得到不同的env的
 
+# DummyVecEnv 的参数是一个函数列表，每个函数是 get_env_fn(i)，返回 init_env。
+# 此时并没有真正实例化环境，只是把创建环境的函数（init_env）传递给了 DummyVecEnv。
+# 只有在 DummyVecEnv 内部需要用到环境时，才会调用这些 init_env 函数，真正实例化环境对象。
 def make_train_env(all_args):
     def get_env_fn(rank):
         def init_env():
             # TODO 注意注意，这里选择连续还是离散可以选择注释上面两行，或者下面两行。
-            # TODO Important, here you can choose continuous or discrete action space by uncommenting the above two lines or the below two lines.
+            # from envs.env_continuous import ContinuousActionEnv
+            # env = ContinuousActionEnv()
 
-            from envs.env_continuous import ContinuousActionEnv
-
-            env = ContinuousActionEnv()
-
-            # from envs.env_discrete import DiscreteActionEnv
-
-            # env = DiscreteActionEnv()
+            from envs.env_discrete import DiscreteActionEnv
+            env = DiscreteActionEnv()  #创建环境，告诉环境动作空间维度、观测维度、共享观测维度
 
             env.seed(all_args.seed + rank * 1000)
             return env
 
-        return init_env
+        return init_env  
 
-    return DummyVecEnv([get_env_fn(i) for i in range(all_args.n_rollout_threads)])
+    return DummyVecEnv([get_env_fn(i) for i in range(all_args.n_rollout_threads)])  #封装n_rollout_threads线程数
 
 
 def make_eval_env(all_args):
     def get_env_fn(rank):
         def init_env():
             # TODO 注意注意，这里选择连续还是离散可以选择注释上面两行，或者下面两行。
-            # TODO Important, here you can choose continuous or discrete action space by uncommenting the above two lines or the below two lines.
-            from envs.env_continuous import ContinuousActionEnv
-
-            env = ContinuousActionEnv()
-            # from envs.env_discrete import DiscreteActionEnv
-            # env = DiscreteActionEnv()
+            # from envs.env_continuous import ContinuousActionEnv
+            # env = ContinuousActionEnv()
+            from envs.env_discrete import DiscreteActionEnv
+            env = DiscreteActionEnv()
             env.seed(all_args.seed + rank * 1000)
             return env
 
@@ -84,7 +83,7 @@ def main(args):
         assert all_args.use_recurrent_policy or all_args.use_naive_recurrent_policy, "check recurrent policy!"
     elif all_args.algorithm_name == "mappo":
         assert (
-            all_args.use_recurrent_policy == False and all_args.use_naive_recurrent_policy == False
+            all_args.use_recurrent_policy == False and all_args.use_naive_recurrent_policy == False  #不用rmappo，那么所有循环神经网络的参数都要等于false
         ), "check recurrent policy!"
     else:
         raise NotImplementedError
@@ -104,9 +103,9 @@ def main(args):
     else:
         print("choose to use cpu...")
         device = torch.device("cpu")
-        torch.set_num_threads(all_args.n_training_threads)
+        torch.set_num_threads(all_args.n_training_threads)  #设置训练进程
 
-    # run dir
+    # run dir 保存结果的路径目录，注意：检查一下
     run_dir = (
         Path(os.path.split(os.path.dirname(os.path.abspath(__file__)))[0] + "/results")
         / all_args.env_name
@@ -143,14 +142,14 @@ def main(args):
         + str(all_args.user_name)
     )
 
-    # seed
+    # seed随机种子
     torch.manual_seed(all_args.seed)
     torch.cuda.manual_seed_all(all_args.seed)
     np.random.seed(all_args.seed)
 
     # env init
-    envs = make_train_env(all_args)
-    eval_envs = make_eval_env(all_args) if all_args.use_eval else None
+    envs = make_train_env(all_args)  #训练env
+    eval_envs = make_eval_env(all_args) if all_args.use_eval else None   #评估env
     num_agents = all_args.num_agents
 
     config = {
@@ -164,12 +163,12 @@ def main(args):
 
     # run experiments
     if all_args.share_policy:
-        from runner.shared.env_runner import EnvRunner as Runner
+        from runner.shared.env_runner import EnvRunner as Runner  #智能体之间参数是否共享
     else:
         from runner.separated.env_runner import EnvRunner as Runner
 
-    runner = Runner(config)
-    runner.run()
+    runner = Runner(config)  #这里config里面是有一个实例化的对象envs和eval_envs的，初始化runner
+    runner.run()             #实际采数据、交互
 
     # post process
     envs.close()

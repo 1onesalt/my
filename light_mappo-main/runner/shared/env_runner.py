@@ -17,7 +17,7 @@ def _t2n(x):
     return x.detach().cpu().numpy()
 
 
-class EnvRunner(Runner):
+class EnvRunner(Runner):  #继承Runner
     """Runner class to perform training, evaluation. and data collection for the MPEs. See parent class for details."""
 
     def __init__(self, config):
@@ -113,7 +113,7 @@ class EnvRunner(Runner):
         obs = self.envs.reset()  # shape = [env_num, agent_num, obs_dim]
 
         # replay buffer
-        if self.use_centralized_V:
+        if self.use_centralized_V:  #把agent的观测拼凑，智能体共享观测，也要赋值给agent的观测存起来
             share_obs = obs.reshape(self.n_rollout_threads, -1)  # shape = [env_num, agent_num * obs_dim]
             share_obs = np.expand_dims(share_obs, 1).repeat(
                 self.num_agents, axis=1
@@ -125,7 +125,7 @@ class EnvRunner(Runner):
         self.buffer.obs[0] = obs.copy()
 
     @torch.no_grad()
-    def collect(self, step):
+    def collect(self, step):   #看一下
         self.trainer.prep_rollout()
         (
             value,
@@ -152,7 +152,7 @@ class EnvRunner(Runner):
         rnn_states_critic = np.array(
             np.split(_t2n(rnn_states_critic), self.n_rollout_threads)
         )  # [env_num, agent_num, 1, hidden_size]
-        # rearrange action
+        # rearrange action 网络输出的做一个后处理得到actions
         if self.envs.action_space[0].__class__.__name__ == "MultiDiscrete":
             for i in range(self.envs.action_space[0].shape):
                 uc_actions_env = np.eye(self.envs.action_space[0].high[i] + 1)[actions[:, :, i]]

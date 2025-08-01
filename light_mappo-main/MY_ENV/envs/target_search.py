@@ -4,6 +4,8 @@ import random
 import gym
 import numpy as np
 
+from gym.spaces import Dict, Box
+
 from MY_ENV.utils.action_space import MultiAgentActionSpace
 from MY_ENV.utils.observation_space import MultiAgentObservationSpace
 from MY_ENV.utils.draw import draw_grid, fill_cell, write_cell_text
@@ -26,12 +28,14 @@ class target_search(gym.Env):
         self.step_count = None
         self.total_rewad = None
         self.agent_step_size = 7
+
         self.channel = 3
         self.obs_Rnums = 4
         self.grid_M = 20  
         self.grid_N = 20  
-        self.utility_map_dim = self.grid_M * self.grid_N
-        self.obs_dim = 8 * self.channel * self.obs_Rnums + self.utility_map_dim
+
+        self.utility_obs_dim = self.grid_M * self.grid_N    #20 * 20 = 400
+        self.target_obs_dim = 8 * self.channel * self.obs_Rnums 
 
         self.state = [
             [
@@ -53,25 +57,22 @@ class target_search(gym.Env):
         self.agent_pos = {_: None for _ in range(self.n_agents)}
         self.agent_Z_dicaer = [[[], []] for _ in range(self.n_agents)]
 
-        # 1. 初始化观测上下界
-        self.obs_low = np.zeros(self.obs_dim, dtype=np.float32)
-        self.obs_high = np.ones(self.obs_dim, dtype=np.float32)
-
-        section = 8 * self.obs_Rnums  # 2. 分通道设置上下界
-        
-        self.obs_high[0:section] = self.n_targets  # 通道1：目标数量 ∈ [0, n_targets]
-
-        self.obs_low[section:2 * section] = self.x_min  # 通道2：目标x均值 ∈ [x_min, x_max]
-        self.obs_high[section:2 * section] = self.x_max
-
-        self.obs_low[2 * section:3 * section] = self.y_min  # 通道3：目标y均值 ∈ [y_min, y_max]
-        self.obs_high[2 * section:3 * section] = self.y_max
-
-        self.obs_low[-self.utility_map_dim:] = 0   # 3. 搜索效用图 ∈ [0,1]
-        self.obs_high[-self.utility_map_dim:] = 1
-
-        self.observation_space = MultiAgentObservationSpace(
-                                [spaces.Box(self.obs_low, self.obs_high, dtype=np.float32) for _ in range(self.n_agents)])
+        self.observation_space = MultiAgentObservationSpace([
+            Dict({
+                'target': Box(
+                    low=-np.inf,
+                    high=np.inf,
+                    shape=(self.target_obs_dim,),
+                    dtype=np.float32
+                ),
+                'utility': Box(
+                    low=0.0,
+                    high=1.0,
+                    shape=(self.utility_obs_dim,),
+                    dtype=np.float32
+                )
+            }) for _ in range(self.n_agents)]
+        )
         
     def full_init_pos(self):
         """
@@ -157,56 +158,88 @@ class target_search(gym.Env):
         self.state[agent_i] = X_now    #更新状态
         state_draw, num_draw  = State_extraction(X_now)
 
-        obs = np.zeros(self.obs_dim, dtype=np.float32)
-
-        # 填充通道1：目标数量
+        # ===== 构建目标状态观测向量 =====
         section = 8 * self.obs_Rnums
-        region_x_means = np.zeros(section, dtype=np.float32)  # 用于存储每个区域的目标x均值
-        region_y_means = np.zeros(section, dtype=np.float32)
         region_counts = np.zeros(section, dtype=np.int32)
+        region_x_sums = np.zeros(section, dtype=np.float32)
+        region_y_sums = np.zeros(section, dtype=np.float32)
+
         for i in range(section):
-            # 根据目标状态估计的集合，统计每个区域的目标数量
-            region_count = 0
+            count = 0
             for target in state_draw:
-                x, y = target[0], target[1]  # 假设目标状态包含x和y坐标
-                if self.is_in_region(x, y, model_data, region_index=i, agent_pos=pos):  # 判断目标是否在第i个区域
-                    region_count += 1
-                    region_x_means[i] += x
-                    region_y_means[i] += y
+                x, y = target[0], target[1]
+                if self.is_in_region(x, y, model_data, region_index=i, agent_pos=pos):
+                    count += 1
+                    region_x_sums[i] += x
+                    region_y_sums[i] += y
                     region_counts[i] += 1
-            obs[i] = region_count
 
-            # 填充通道2：目标x均值
-        for i in range(section):
-            if region_counts[i] > 0:
-                region_x_means[i] /= region_counts[i]  # 计算均值
-        obs[section:2 * section] = region_x_means
+        # 避免除 0 的处理
+        region_x_means = np.where(region_counts > 0, region_x_sums / region_counts, 0.0)
+        region_y_means = np.where(region_counts > 0, region_y_sums / region_counts, 0.0)
 
-        # 填充通道3：目标y均值
-        for i in range(section):
-            if region_counts[i] > 0:
-                region_y_means[i] /= region_counts[i]  # 计算均值
-        obs[2 * section:3 * section] = region_y_means
-        
-        #更新地图:需要维护的搜索效用图和提取后的观测数据情况
+        # 拼接目标状态向量
+        target_obs = np.concatenate([region_counts, region_x_means, region_y_means], dtype=np.float32)
 
+        # ===== 效用图部分 =====
+        utility_obs = self.agent_utility_maps[agent_i].flatten().astype(np.float32)
 
-
- 
-
-        return 
-
-
+        # ===== 返回结构化观测 =====
+        return {
+            'target': target_obs,
+            'utility': utility_obs
+        }
 
     def reset(self):
         self.step_count = 0
         self.total_rewad = [0 for _ in range(self.n_agents)]
         self.trajectories = self.full_init_pos()
-        # 重置每个agent的效用图
+
+         # 初始化每个 agent 的状态
+        self.state = [
+            [
+                0,                      # 权重
+                np.zeros((1, 4)),       # 均值
+                np.zeros((4, 4)),       # 协方差
+                0                       # 粒子数量
+            ] for _ in range(self.n_agents)
+        ]
+
+        # 初始化 agent 位置 & 初始观测（Z_dicaer）
+        targets_birth_time, targets_death_time, targets_start = targets()
+        self.trajectories, _ = target_CV(
+            targets_birth_time, targets_death_time, targets_start,
+            self.step,
+            self.x_min, self.x_max,
+            self.y_min, self.y_max,
+            noise=True
+        )
+
+        for agent_i in range(self.n_agents):
+            # 初始化位置
+            x = random.uniform(self.x_min, self.x_max)
+            y = random.uniform(self.y_min, self.y_max)
+            self.agent_pos[agent_i] = np.array([x, y])
+
+            # 初始化观测数据缓存 Z_dicaer
+            self.agent_Z_dicaer[agent_i] = [[], []]
+            model_data = model(x, y)
+            for i in range(2):
+                z_polar = observe_Fov(model_data, self.trajectories[i])
+                Z_dicaer = polar2dicaer(z_polar, model_data)
+                self.agent_Z_dicaer[agent_i][i] = Z_dicaer
+
+        # 重置效用图为全 1
         for i in range(self.n_agents):
-            self.agent_utility_maps[i][:] = 1
+            self.agent_utility_maps[i][:] = 1.0
 
+        # 获取初始观测，返回 list[Dict] 格式
+        obs_list = []
+        for i in range(self.n_agents):
+            obs = self.get_agent_obs(i)
+            obs_list.append(obs)
 
+        return obs_list
 
 
     def update_agent_pos(self, agent_i, action):
@@ -250,8 +283,10 @@ class target_search(gym.Env):
         # 更新位置
         self.agent_pos[agent_i] = (new_x, new_y)
 
-    
-    def step(self):
+    def compute_reward(self, agent_i, obs):
+        
+
+    def step(self, actions):
         """
         对每个agent获取观测,根据观测和状态获得动作,并更新位置、计算奖励。
         (这里只需要输入动作即可)
@@ -259,19 +294,36 @@ class target_search(gym.Env):
         返回观测、奖励、结束标志和额外信息。
         """
         self.step_count += 1
+        obs_n = []
+        rewards = []
+        dones = []
+        infos = []
 
-        #obs = self.get_agent_obs()
-        rewards = [0 for _ in range(self.n_agents)]
-        dones = [False for _ in range(self.n_agents)]
-        infos = [{} for _ in range(self.n_agents)]
-
-        # 更新每个 agent 的位置、观测，计算奖励和是否终止
         for agent_i in range(self.n_agents):
+            action = actions[agent_i]
+
+            # 更新 agent 位置
+            self.update_agent_pos(agent_i, action)
+
+            # 获取新观测（结构化）
             obs = self.get_agent_obs(agent_i)
+            obs_n.append(obs)
 
+            # 计算奖励（可自定义逻辑）
+            reward = self.compute_reward(agent_i, obs)
+            rewards.append(reward)
+            self.total_rewad[agent_i] += reward
 
-            
-        return obs, rewards, dones, infos
+            # done 标志：默认仅在最大步数时终止
+            done = self.step_count >= self.step
+            dones.append(done)
+
+            # info（可扩展）
+            infos.append({
+                'step': self.step_count
+            })
+
+        return obs_n, rewards, dones, infos
 
 
 

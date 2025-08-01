@@ -27,7 +27,7 @@ class Runner(object):
         self.env_name = self.all_args.env_name
         self.algorithm_name = self.all_args.algorithm_name
         self.experiment_name = self.all_args.experiment_name
-        self.use_centralized_V = self.all_args.use_centralized_V
+        self.use_centralized_V = self.all_args.use_centralized_V  #是否使用集中式价值函数
         self.use_obs_instead_of_state = self.all_args.use_obs_instead_of_state
         self.num_env_steps = self.all_args.num_env_steps
         self.episode_length = self.all_args.episode_length
@@ -63,7 +63,7 @@ class Runner(object):
         share_observation_space = self.envs.share_observation_space[0] if self.use_centralized_V else self.envs.observation_space[0]
 
         # policy network
-        self.policy = Policy(self.all_args,
+        self.policy = Policy(self.all_args,                 #实例化policy
                             self.envs.observation_space[0],
                             share_observation_space,
                             self.envs.action_space[0],
@@ -72,10 +72,10 @@ class Runner(object):
         if self.model_dir is not None:
             self.restore()
 
-        # algorithm
-        self.trainer = TrainAlgo(self.all_args, self.policy, device = self.device)
+        # algorithm没有模型路径就实例化一个trainer
+        self.trainer = TrainAlgo(self.all_args, self.policy, device = self.device)  #里面应该是计算路径、反向传播等内容
         
-        # buffer
+        # buffer存数据
         self.buffer = SharedReplayBuffer(self.all_args,
                                         self.num_agents,
                                         self.envs.observation_space[0],
