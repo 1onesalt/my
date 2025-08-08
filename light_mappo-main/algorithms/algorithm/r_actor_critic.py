@@ -37,13 +37,13 @@ class R_Actor(nn.Module):
         self.tpdv = dict(dtype=torch.float32, device=device)
 
         obs_shape = get_shape_from_obs_space(obs_space)
-        base = CNNBase if len(obs_shape) == 3 else MLPBase   #根据观测的维度选择CNN还是MLP
+        base = CNNBase if len(obs_shape) == 3 else MLPBase   #obs_shape = (C, H, W) → CNN、obs_shape = (N,) → MLP
         self.base = base(args, obs_shape)                    #创建base网络
 
-        if self._use_naive_recurrent_policy or self._use_recurrent_policy:
+        if self._use_naive_recurrent_policy or self._use_recurrent_policy:  #是否启用RNN 层
             self.rnn = RNNLayer(self.hidden_size, self.hidden_size, self._recurrent_N, self._use_orthogonal)
 
-        self.act = ACTLayer(action_space, self.hidden_size, self._use_orthogonal, self._gain)
+        self.act = ACTLayer(action_space, self.hidden_size, self._use_orthogonal, self._gain)  #根据网络提取的特征，生成具体动作
 
         self.to(device)
 
@@ -61,13 +61,13 @@ class R_Actor(nn.Module):
         :return action_log_probs: (torch.Tensor) log probabilities of taken actions.
         :return rnn_states: (torch.Tensor) updated RNN hidden states.
         """
-        obs = check(obs).to(**self.tpdv)
+        obs = check(obs).to(**self.tpdv)        #把 numpy → torch、reshape、检查 dtype 等
         rnn_states = check(rnn_states).to(**self.tpdv)
         masks = check(masks).to(**self.tpdv)
         if available_actions is not None:
             available_actions = check(available_actions).to(**self.tpdv)
 
-        actor_features = self.base(obs)
+        actor_features = self.base(obs)        #过 base 网络提取特征
 
         if self._use_naive_recurrent_policy or self._use_recurrent_policy:
             actor_features, rnn_states = self.rnn(actor_features, rnn_states, masks)

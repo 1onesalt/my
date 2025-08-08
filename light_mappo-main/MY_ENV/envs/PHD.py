@@ -7,8 +7,10 @@ def generate(z_lastD, nums_z_lastD, z_nowD, nums_z_nowD, Vx_thre, Vy_thre):
     w_new = []
     m_new = []
     P_new = []
+    Vx_max = 20
+    Vy_max = 20
 
-        # 先将 list[array([x, y])] 转换为 2×N 数组
+    # 先将 list[array([x, y])] 转换为 2×N 数组
     z_lastD = np.array(z_lastD).T  # shape: (2, nums_z_lastD)
     z_nowD = np.array(z_nowD).T    # shape: (2, nums_z_nowD)
 
@@ -17,11 +19,11 @@ def generate(z_lastD, nums_z_lastD, z_nowD, nums_z_nowD, Vx_thre, Vy_thre):
             z_delta = z_nowD[:,i] - z_lastD[:,j]
             if abs(z_delta[0]) < Vx_thre and abs(z_delta[1]) < Vy_thre:
                 # x轴速度赋值
-                vx = Vx_thre if abs(z_delta[0]) > Vx_thre and z_delta[0] >= 0 else \
-                     -Vx_thre if abs(z_delta[0]) > Vx_thre and z_delta[0] < 0 else z_delta[0]
+                vx = Vx_max if abs(z_delta[0]) > Vx_max and z_delta[0] >= 0 else \
+                     -Vx_max if abs(z_delta[0]) > Vx_max and z_delta[0] < 0 else z_delta[0]
                 # y轴速度赋值
-                vy = Vy_thre if abs(z_delta[1]) > Vy_thre and z_delta[1] >= 0 else \
-                     -Vy_thre if abs(z_delta[1]) > Vy_thre and z_delta[1] < 0 else z_delta[1]
+                vy = Vy_max if abs(z_delta[1]) > Vy_max and z_delta[1] >= 0 else \
+                     -Vy_max if abs(z_delta[1]) > Vy_max and z_delta[1] < 0 else z_delta[1]
                 m = [z_nowD[0, i], vx, z_nowD[1, i], vy]
                 m_new.append(m)
                 w_new.append(0.2)
@@ -35,7 +37,7 @@ def generate(z_lastD, nums_z_lastD, z_nowD, nums_z_nowD, Vx_thre, Vy_thre):
     return w_new, m_new, P_new, J_new
 
 def UKFpart(X_fusion_pre, P_fusion_pre, R, x_radar, y_radar):
-    Variable_dimension = X_fusion_pre.shape[0]
+    Variable_dimension = X_fusion_pre.shape[0]      #粒子的个数
     Z_ob_diffusion = np.zeros((2 * Variable_dimension + 1 , 2))
     w_m =  np.zeros((2 * Variable_dimension + 1 , 1))
     w_p = np.zeros((2 * Variable_dimension + 1 , 1))
@@ -151,9 +153,10 @@ def M_UKF(X_fusion_pre, Z_polar, Z_fusion_ob, k_ukf, flag_jump):
 def State_extraction(X_now):
     state_draw_list = []
 
-    for component in X_now:
-        w = component['w']
-        m = component['m']
+    weights = X_now[0][0]  # 权重列表
+    means = X_now[0][1]    # 均值列表
+
+    for w, m in zip(weights, means):
         j = min(round(w), 2)  # 限制最多复制2次
         for _ in range(j):
             state_draw_list.append(m)
@@ -175,13 +178,13 @@ class PHD():
         """
         self.T = 1
         self.Ps = 1
-        self.Pd = params["Pd"]
-        self.R = params["obverser_R"]
-        self.Vx_thre = 200
-        self.Vy_thre = 200
+        self.Pd = params["Pd"]           #检测概率
+        self.R = params["obverser_R"]    #观测误差矩阵
+        self.Vx_thre = 50
+        self.Vy_thre = 50
         self.x_agent = params['x_agent']
         self.y_agent = params['y_agent']
-        self.Zr = params["Zr"]
+        self.Zr = params["Zr"]           #杂波强度
         self.A = np.array([[1, self.T, 0, 0],
                             [0, 1, 0, 0],
                             [0, 0, 1, self.T],
@@ -220,9 +223,9 @@ class PHD():
         m_pos = []
         P_pos = []
 
-        P_z = []
-        K_ukf = []
-        P_ukf = []
+        P_z = []            #
+        K_ukf = []          #
+        P_ukf = []          #
 
         # 新生分量批量赋值
         for i in range(self.J_new):  #0 ~ J_new - 1
@@ -236,7 +239,7 @@ class PHD():
             m_pre.append(np.array(self.m_priori[i]) @ self.A.T)
             P_pre.append(self.Q + self.A @ np.array(self.P_priori[i]) @ self.A.T)
 
-        J_pre = total
+        J_pre = total       #预测的粒子数量
         if J_pre == 0:
             W_phd = []
             M_phd = []
@@ -254,7 +257,7 @@ class PHD():
                 P_pos.append(P_pre[i])
 
             flag_jump = np.zeros((J_pre, 1))
-            for i in range(J_pre):
+            for i in range(J_pre):                                  
                 Z_obpre_tmp, P_z_tmp, K_ukf_tmp, P_ukf_tmp, flag_jump_tmp = UKFpart(m_pre[i], P_pre[i], self.R, self.x_agent, self.y_agent)
                 Z_obpre.append(Z_obpre_tmp)
                 P_z.append(P_z_tmp)
@@ -267,16 +270,15 @@ class PHD():
             e = 0
             #self.z_nowP = np.array(self.z_nowP)
             n_znow = len(self.z_nowP)
-            #Z_obpre = np.array(Z_obpre)
-            #P_z = np.array(P_z)
 
-            for i in range(n_znow):
+
+            for i in range(n_znow):    #观测的数量
                 e = e + 1
-                for j in range(J_pre):
-                    Z_pred = Z_obpre[j]              
-                    Pz_j = P_z[j]                      
+                for j in range(J_pre):  #预测的粒子数量
+                    Z_pred = Z_obpre[j]            #观测预测状态  
+                    Pz_j = P_z[j]                  #观测之后的协方差
                     
-                    # 当前帧的实际观测值
+                    # 实际极坐标观测
                     z_now = self.z_nowP[i]              
 
                     # 概率密度计算
@@ -310,8 +312,10 @@ class PHD():
             # ------- 剪枝 -------
             T = 0.2 * (1 - self.Pd) * 0.99 + 1e-5
             W_select, M_select, P_select = [], [], []
+            #k = 0
             for i in range(J_pos):
                 if w_pos[i] >= T:
+                    #k += 1
                     W_select.append(w_pos[i])
                     M_select.append(m_pos[i])
                     P_select.append(P_pos[i])
@@ -322,46 +326,75 @@ class PHD():
             X_now = []
 
             while not all(used):
-                unused_indices = [i for i, u in enumerate(used) if not u]
-                max_idx = max(unused_indices, key=lambda i: W_select[i])
+                W_phd, M_phd, P_phd = [], [], []
+
+                unused_indices = []
+                for i in range(len(used)):
+                    if not used[i]:
+                        unused_indices.append(i)
+
+                # 找出未被使用粒子中权重最大的粒子的索引
+                max_idx = unused_indices[0]
+                for i in unused_indices:
+                    if W_select[i] > W_select[max_idx]:
+                        max_idx = i
+
                 center = np.array(M_select[max_idx])
                 close_idx = [max_idx]
 
+                # 遍历所有未被使用的粒子索引
                 for j in unused_indices:
+                    # 如果这个粒子就是当前的最大权重粒子，则跳过
                     if j == max_idx:
                         continue
-                    dist = np.linalg.norm(np.array(M_select[j])[ [0, 2] ] - center[[0, 2]])
+
+                    # 提取当前粒子和中心粒子的 [x, y] 坐标（索引 0 和 2）
+                    particle_pos = np.array(M_select[j])[ [0, 2] ]
+                    center_pos = center[[0, 2]]
+
+                    # 计算这两个粒子在位置上的欧式距离
+                    dist = np.linalg.norm(particle_pos - center_pos)
+
+                    # 如果距离小于聚合阈值 U，则将其视为一个聚类成员
                     if dist < U:
                         close_idx.append(j)
 
-
                 weights = np.array([W_select[k] for k in close_idx])
                 w_total = weights.sum()
-                weights /= w_total
+                W_phd.append(w_total)
 
                 # 计算加权均值
-                mean = np.zeros_like(M_select[0])
+                mean = np.zeros_like(M_select[0])  #与M_select[0]形状相同全为0的数组
                 for k in range(len(close_idx)):
                     mean += weights[k] * np.array(M_select[close_idx[k]])
+                mean /= w_total
+                M_phd.append(mean)
 
                 # 计算协方差
                 cov = np.zeros_like(P_select[0])
                 for k in range(len(close_idx)):
                     m = np.array(M_select[close_idx[k]])
                     p = P_select[close_idx[k]]
-                    cov += weights[k] * (p + np.outer(m - mean, m - mean))
+                    cov += weights[k] * (p + (m - mean)[:, None] @ (m - mean)[None, :])
+                cov /= w_total
+                P_phd.append(cov)
 
-                X_now.append({'w': w_total, 'm': mean, 'P': cov})
                 for k in close_idx:
                     used[k] = True
 
             # ------- 裁剪 -------
             Jmax = 200
-            if len(X_now) > Jmax:
-                X_now.sort(key=lambda x: x['w'], reverse=True)
-                X_now = X_now[:Jmax]
+            if len(W_phd) > Jmax:
+                sorted_indices = sorted(range(len(W_phd)), key=lambda i: W_phd[i], reverse=True)
+                top_indices = sorted_indices[:Jmax]
+                W_phd = [W_phd[i] for i in top_indices]
+                M_phd = [M_phd[i] for i in top_indices]
+                P_phd = [P_phd[i] for i in top_indices]
+            X_now = [
+                [W_phd, M_phd, P_phd, len(W_phd)]
+            ]                            
+            return X_now  
             
-            return X_now, cov
             
             # ------- 最终输出赋值 -------
 

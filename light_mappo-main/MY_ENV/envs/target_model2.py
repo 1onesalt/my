@@ -18,7 +18,7 @@ def model(x_agent, y_agent):
     return model
 
 def targets(n_target, x_range=(-500, 500), y_range=(-500, 500), v_range=(-10, 10), num_of_scans=100):
-    targets_birth_time = np.random.randint(0, num_of_scans // 5, size=n_target).tolist()
+    targets_birth_time = np.random.randint(0, num_of_scans // 5, size=n_target).tolist()   #0-20时刻内出生
     targets_death_time = [num_of_scans, num_of_scans, num_of_scans, num_of_scans, num_of_scans,
                           num_of_scans]
     targets_start = []
@@ -40,7 +40,7 @@ def target_CV(targets_birth_time, targets_death_time, targets_start, step, x_min
     Q = np.diag([1, 0.01, 1, 0.01])
 
     num_of_scans = step
-    trajectories = []
+    trajectories = []                #轨迹
     for i in range(num_of_scans):
         trajectories.append([])
     targets_tracks = {}
