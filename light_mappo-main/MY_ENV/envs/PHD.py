@@ -153,8 +153,11 @@ def M_UKF(X_fusion_pre, Z_polar, Z_fusion_ob, k_ukf, flag_jump):
 def State_extraction(X_now):
     state_draw_list = []
 
-    weights = X_now[0][0]  # 权重列表
-    means = X_now[0][1]    # 均值列表
+    # weights = X_now[0][0]  # 权重列表
+    # means = X_now[0][1]    # 均值列表
+    weights = X_now[0]  # 权重列表
+    means = X_now[1]  
+
 
     for w, m in zip(weights, means):
         j = min(round(w), 2)  # 限制最多复制2次
@@ -234,17 +237,18 @@ class PHD():
             P_pre.append(self.A @ np.array(self.P_new[i]) @ self.A.T + self.Q)
 
         # 先验分量批量赋值
-        for i in range(self.J_new , total):   #J_new ~ total - 1
+        for i in range(self.J_priori):   #J_new ~ total - 1
             w_pre.append(self.Ps * self.w_priori[i])
             m_pre.append(np.array(self.m_priori[i]) @ self.A.T)
             P_pre.append(self.Q + self.A @ np.array(self.P_priori[i]) @ self.A.T)
 
         J_pre = total       #预测的粒子数量
         if J_pre == 0:
-            W_phd = []
-            M_phd = []
-            P_phd = []
-            e = 0
+            # W_phd = []
+            # M_phd = []
+            # P_phd = []
+            # e = 0
+            return [[], [], [], 0]
         else:
             Z_obpre = []
             P_z = []
@@ -390,10 +394,13 @@ class PHD():
                 W_phd = [W_phd[i] for i in top_indices]
                 M_phd = [M_phd[i] for i in top_indices]
                 P_phd = [P_phd[i] for i in top_indices]
-            X_now = [
-                [W_phd, M_phd, P_phd, len(W_phd)]
-            ]                            
-            return X_now  
+            # X_now = [
+            #     [W_phd, M_phd, P_phd, len(W_phd)]
+            # ]   
+            # return X_now      
+                 
+            return [W_phd, M_phd, P_phd, len(W_phd)] 
+             
             
             
             # ------- 最终输出赋值 -------

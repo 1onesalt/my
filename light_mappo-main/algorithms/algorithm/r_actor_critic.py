@@ -36,9 +36,11 @@ class R_Actor(nn.Module):
         self._recurrent_N = args.recurrent_N
         self.tpdv = dict(dtype=torch.float32, device=device)
 
-        obs_shape = get_shape_from_obs_space(obs_space)
-        base = CNNBase if len(obs_shape) == 3 else MLPBase   #obs_shape = (C, H, W) → CNN、obs_shape = (N,) → MLP
-        self.base = base(args, obs_shape)                    #创建base网络
+        # obs_shape = get_shape_from_obs_space(obs_space)
+        # base = CNNBase if len(obs_shape) == 3 else MLPBase   #obs_shape = (C, H, W) → CNN、obs_shape = (N,) → MLP
+        # self.base = base(args, obs_shape)                    #创建base网络
+        from algorithms.utils.multimodal import MultiModalBase
+        self.base = MultiModalBase(args, obs_space)
 
         if self._use_naive_recurrent_policy or self._use_recurrent_policy:  #是否启用RNN 层
             self.rnn = RNNLayer(self.hidden_size, self.hidden_size, self._recurrent_N, self._use_orthogonal)
@@ -61,12 +63,22 @@ class R_Actor(nn.Module):
         :return action_log_probs: (torch.Tensor) log probabilities of taken actions.
         :return rnn_states: (torch.Tensor) updated RNN hidden states.
         """
-        obs = check(obs).to(**self.tpdv)        #把 numpy → torch、reshape、检查 dtype 等
-        rnn_states = check(rnn_states).to(**self.tpdv)
-        masks = check(masks).to(**self.tpdv)
-        if available_actions is not None:
-            available_actions = check(available_actions).to(**self.tpdv)
+        # obs = check(obs).to(**self.tpdv)        #把 numpy → torch、reshape、检查 dtype 等
+        # rnn_states = check(rnn_states).to(**self.tpdv)
+        # masks = check(masks).to(**self.tpdv)
+        # if available_actions is not None:
+        #     available_actions = check(available_actions).to(**self.tpdv)
 
+        # 确保输入是字典格式
+        if not isinstance(obs, dict):
+            raise ValueError("Observation must be a dictionary")
+            
+        # 转换每个观测分量到tensor
+        for key in obs:
+            if not torch.is_tensor(obs[key]):
+                obs[key] = torch.FloatTensor(obs[key])
+            obs[key] = obs[key].to(**self.tpdv)
+        
         actor_features = self.base(obs)        #过 base 网络提取特征
 
         if self._use_naive_recurrent_policy or self._use_recurrent_policy:
@@ -90,17 +102,30 @@ class R_Actor(nn.Module):
         :return action_log_probs: (torch.Tensor) log probabilities of the input actions.
         :return dist_entropy: (torch.Tensor) action distribution entropy for the given inputs.
         """
-        obs = check(obs).to(**self.tpdv)
-        rnn_states = check(rnn_states).to(**self.tpdv)
-        action = check(action).to(**self.tpdv)
-        masks = check(masks).to(**self.tpdv)
-        if available_actions is not None:
-            available_actions = check(available_actions).to(**self.tpdv)
+        # obs = check(obs).to(**self.tpdv)
+        # rnn_states = check(rnn_states).to(**self.tpdv)
+        # action = check(action).to(**self.tpdv)
+        # masks = check(masks).to(**self.tpdv)
+        # if available_actions is not None:
+        #     available_actions = check(available_actions).to(**self.tpdv)
 
-        if active_masks is not None:
-            active_masks = check(active_masks).to(**self.tpdv)
+        # if active_masks is not None:
+        #     active_masks = check(active_masks).to(**self.tpdv)
 
-        actor_features = self.base(obs)
+        # actor_features = self.base(obs)
+
+        if not isinstance(obs, dict):
+            raise ValueError("Observation must be a dictionary")
+        
+        processed_obs = {}
+        for key in obs:
+            if not torch.is_tensor(obs[key]):
+                processed_obs[key] = torch.FloatTensor(obs[key])
+            else:
+                processed_obs[key] = obs[key]
+            processed_obs[key] = processed_obs[key].to(**self.tpdv)
+        
+        actor_features = self.base(processed_obs)
 
         if self._use_naive_recurrent_policy or self._use_recurrent_policy:
             actor_features, rnn_states = self.rnn(actor_features, rnn_states, masks)
@@ -112,7 +137,6 @@ class R_Actor(nn.Module):
                                                                    else None)
 
         return action_log_probs, dist_entropy
-
 
 class R_Critic(nn.Module):
     """
@@ -133,9 +157,13 @@ class R_Critic(nn.Module):
         self.tpdv = dict(dtype=torch.float32, device=device)
         init_method = [nn.init.xavier_uniform_, nn.init.orthogonal_][self._use_orthogonal]
 
-        cent_obs_shape = get_shape_from_obs_space(cent_obs_space)
-        base = CNNBase if len(cent_obs_shape) == 3 else MLPBase
-        self.base = base(args, cent_obs_shape)
+        # cent_obs_shape = get_shape_from_obs_space(cent_obs_space)
+        # base = CNNBase if len(cent_obs_shape) == 3 else MLPBase
+        # self.base = base(args, cent_obs_shape)
+
+        # 同样使用多模态base
+        from algorithms.utils.multimodal import MultiModalBase
+        self.base = MultiModalBase(args, cent_obs_space)
 
         if self._use_naive_recurrent_policy or self._use_recurrent_policy:
             self.rnn = RNNLayer(self.hidden_size, self.hidden_size, self._recurrent_N, self._use_orthogonal)
@@ -160,11 +188,27 @@ class R_Critic(nn.Module):
         :return values: (torch.Tensor) value function predictions.
         :return rnn_states: (torch.Tensor) updated RNN hidden states.
         """
-        cent_obs = check(cent_obs).to(**self.tpdv)
-        rnn_states = check(rnn_states).to(**self.tpdv)
-        masks = check(masks).to(**self.tpdv)
+        # cent_obs = check(cent_obs).to(**self.tpdv)
+        # rnn_states = check(rnn_states).to(**self.tpdv)
+        # masks = check(masks).to(**self.tpdv)
 
-        critic_features = self.base(cent_obs)
+        # critic_features = self.base(cent_obs)
+
+        # 修改观测处理部分
+        if not isinstance(cent_obs, dict):
+            raise ValueError("Centralized observation must be a dictionary")
+        
+        processed_obs = {}
+        for key in cent_obs:
+            if not torch.is_tensor(cent_obs[key]):
+                processed_obs[key] = torch.FloatTensor(cent_obs[key])
+            else:
+                processed_obs[key] = cent_obs[key]
+            processed_obs[key] = processed_obs[key].to(**self.tpdv)
+        
+        critic_features = self.base(processed_obs)
+
+
         if self._use_naive_recurrent_policy or self._use_recurrent_policy:
             critic_features, rnn_states = self.rnn(critic_features, rnn_states, masks)
         values = self.v_out(critic_features)

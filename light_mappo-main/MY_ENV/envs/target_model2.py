@@ -30,7 +30,7 @@ def targets(n_target, x_range=(-500, 500), y_range=(-500, 500), v_range=(-10, 10
         targets_start.append(np.array([x, vx, y, vy]))
     return targets_birth_time, targets_death_time, targets_start
 
-def target_CV(targets_birth_time, targets_death_time, targets_start, step, x_min, x_max, y_min, y_max, 
+def target_CV(targets_birth_time, targets_death_time, targets_start, num_steps, x_min, x_max, y_min, y_max, 
                           noise=True):
     T = 1
     A = np.array([[1, T, 0, 0],
@@ -39,7 +39,7 @@ def target_CV(targets_birth_time, targets_death_time, targets_start, step, x_min
                 [0, 0, 0, 1]])
     Q = np.diag([1, 0.01, 1, 0.01])
 
-    num_of_scans = step
+    num_of_scans = num_steps
     trajectories = []                #轨迹
     for i in range(num_of_scans):
         trajectories.append([])
