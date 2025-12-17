@@ -36,15 +36,36 @@ class SharedReplayBuffer(object):
         obs_shape = get_shape_from_obs_space(obs_space)
         share_obs_shape = get_shape_from_obs_space(cent_obs_space)
 
-        if type(obs_shape[-1]) == list:
-            obs_shape = obs_shape[:1]
+        # if type(obs_shape[-1]) == list:
+        #     obs_shape = obs_shape[:1]
 
-        if type(share_obs_shape[-1]) == list:
-            share_obs_shape = share_obs_shape[:1]
+        # if type(share_obs_shape[-1]) == list:
+        #     share_obs_shape = share_obs_shape[:1]
 
-        self.share_obs = np.zeros((self.episode_length + 1, self.n_rollout_threads, num_agents, *share_obs_shape),
-                                  dtype=np.float32)
-        self.obs = np.zeros((self.episode_length + 1, self.n_rollout_threads, num_agents, *obs_shape), dtype=np.float32)
+        # self.share_obs = np.zeros((self.episode_length + 1, self.n_rollout_threads, num_agents, *share_obs_shape),
+        #                           dtype=np.float32)
+        # self.obs = np.zeros((self.episode_length + 1, self.n_rollout_threads, num_agents, *obs_shape), dtype=np.float32)
+
+
+        #如果要区分智能体，要加一个self.n_agents,维度
+        self.share_obs = {
+            k: np.zeros(
+                (self.episode_length + 1, 
+                 self.n_rollout_threads, 
+                 *v), dtype=np.float32)
+            for k, v in share_obs_shape.items()
+        }
+
+        self.obs = {
+            k: np.zeros(
+                (self.episode_length + 1, 
+                 self.n_rollout_threads, 
+                 *v), dtype=np.float32)
+            for k, v in obs_shape.items()
+        }
+
+
+
 
         self.rnn_states = np.zeros(
             (self.episode_length + 1, self.n_rollout_threads, num_agents, self.recurrent_N, self.hidden_size),
@@ -94,7 +115,17 @@ class SharedReplayBuffer(object):
         :param available_actions: (np.ndarray) actions available to each agent. If None, all actions are available.
         """
         self.share_obs[self.step + 1] = share_obs.copy()
-        self.obs[self.step + 1] = obs.copy()
+        #self.obs[self.step + 1] = obs.copy()
+
+
+        for key in obs:
+            # 确保键存在（与初始化时的键对应）
+            if key not in self.obs:
+                raise KeyError(f"Observation key {key} not in self.obs")
+            # 写入对应键的数组（时间步维度是第0维）
+            self.obs[key][self.step + 1] = obs[key].copy()
+        
+
         self.rnn_states[self.step + 1] = rnn_states_actor.copy()
         self.rnn_states_critic[self.step + 1] = rnn_states_critic.copy()
         self.actions[self.step] = actions.copy()
@@ -129,7 +160,15 @@ class SharedReplayBuffer(object):
         :param available_actions: (np.ndarray) actions available to each agent. If None, all actions are available.
         """
         self.share_obs[self.step] = share_obs.copy()
-        self.obs[self.step] = obs.copy()
+        #self.obs[self.step] = obs.copy()
+
+
+        self.obs = {
+            key: self.obs[key][:-1].reshape(-1, *self.obs[key].shape[3:]) 
+            for key in self.obs
+        }
+
+
         self.rnn_states[self.step + 1] = rnn_states.copy()
         self.rnn_states_critic[self.step + 1] = rnn_states_critic.copy()
         self.actions[self.step] = actions.copy()
@@ -149,7 +188,14 @@ class SharedReplayBuffer(object):
     def after_update(self):
         """Copy last timestep data to first index. Called after update to model."""
         self.share_obs[0] = self.share_obs[-1].copy()
-        self.obs[0] = self.obs[-1].copy()
+        #self.obs[0] = self.obs[-1].copy()
+
+
+        for key in self.obs:
+            # 对于每个观测项，取最后一个时间步（第0维是时间步）复制到第0个时间步
+            self.obs[key][0] = self.obs[key][-1].copy()
+
+        
         self.rnn_states[0] = self.rnn_states[-1].copy()
         self.rnn_states_critic[0] = self.rnn_states_critic[-1].copy()
         self.masks[0] = self.masks[-1].copy()
@@ -223,7 +269,7 @@ class SharedReplayBuffer(object):
                 for step in reversed(range(self.rewards.shape[0])):
                     self.returns[step] = self.returns[step + 1] * self.gamma * self.masks[step + 1] + self.rewards[step]
 
-    def feed_forward_generator(self, advantages, num_mini_batch=None, mini_batch_size=None):
+    def feed_forward_generator(self, advantages, num_mini_batch=None, mini_batch_size=None):   #忽略RNN
         """
         Yield training data for MLP policies.
         :param advantages: (np.ndarray) advantage estimates.
@@ -247,7 +293,16 @@ class SharedReplayBuffer(object):
         sampler = [rand[i * mini_batch_size:(i + 1) * mini_batch_size] for i in range(num_mini_batch)]
 
         share_obs = self.share_obs[:-1].reshape(-1, *self.share_obs.shape[3:])
-        obs = self.obs[:-1].reshape(-1, *self.obs.shape[3:])
+        #obs = self.obs[:-1].reshape(-1, *self.obs.shape[3:])
+
+
+        # 2. 截取除最后一个时间步外的所有数据，并重塑形状（保持字典结构）
+        obs = {
+            key: self.obs[key][:-1].reshape(-1, *self.obs[key].shape[3:])
+            for key in self.obs
+        }
+
+
         rnn_states = self.rnn_states[:-1].reshape(-1, *self.rnn_states.shape[3:])
         rnn_states_critic = self.rnn_states_critic[:-1].reshape(-1, *self.rnn_states_critic.shape[3:])
         actions = self.actions.reshape(-1, self.actions.shape[-1])
@@ -263,7 +318,16 @@ class SharedReplayBuffer(object):
         for indices in sampler:
             # obs size [T+1 N M Dim]-->[T N M Dim]-->[T*N*M,Dim]-->[index,Dim]
             share_obs_batch = share_obs[indices]
-            obs_batch = obs[indices]
+            #obs_batch = obs[indices]
+
+
+            # 3. 根据indices采样观测数据（按键分别采样，仍返回字典）
+            obs_batch = {
+                key: obs[key][indices]
+                for key in obs
+            }
+
+
             rnn_states_batch = rnn_states[indices]
             rnn_states_critic_batch = rnn_states_critic[indices]
             actions_batch = actions[indices]
@@ -285,7 +349,7 @@ class SharedReplayBuffer(object):
                   value_preds_batch, return_batch, masks_batch, active_masks_batch, old_action_log_probs_batch,\
                   adv_targ, available_actions_batch
 
-    def naive_recurrent_generator(self, advantages, num_mini_batch):
+    def naive_recurrent_generator(self, advantages, num_mini_batch):   #使用rnn
         """
         Yield training data for non-chunked RNN training.
         :param advantages: (np.ndarray) advantage estimates.
@@ -382,7 +446,7 @@ class SharedReplayBuffer(object):
                   value_preds_batch, return_batch, masks_batch, active_masks_batch, old_action_log_probs_batch,\
                   adv_targ, available_actions_batch
 
-    def recurrent_generator(self, advantages, num_mini_batch, data_chunk_length):
+    def recurrent_generator(self, advantages, num_mini_batch, data_chunk_length):  #使用rnn
         """
         Yield training data for chunked RNN training.
         :param advantages: (np.ndarray) advantage estimates.

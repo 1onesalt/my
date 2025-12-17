@@ -7,8 +7,8 @@ def generate(z_lastD, nums_z_lastD, z_nowD, nums_z_nowD, Vx_thre, Vy_thre):
     w_new = []
     m_new = []
     P_new = []
-    Vx_max = 20
-    Vy_max = 20
+    Vx_max = 6
+    Vy_max = 6
 
     # 先将 list[array([x, y])] 转换为 2×N 数组
     z_lastD = np.array(z_lastD).T  # shape: (2, nums_z_lastD)
@@ -16,7 +16,7 @@ def generate(z_lastD, nums_z_lastD, z_nowD, nums_z_nowD, Vx_thre, Vy_thre):
 
     for i in range(nums_z_nowD):
         for j in range(nums_z_lastD):
-            z_delta = z_nowD[:,i] - z_lastD[:,j]
+            z_delta = z_nowD[:,i] - z_lastD[:,j]  #得到的是一个目标的位置变化量 [delta_x, delta_y]
             if abs(z_delta[0]) < Vx_thre and abs(z_delta[1]) < Vy_thre:
                 # x轴速度赋值
                 vx = Vx_max if abs(z_delta[0]) > Vx_max and z_delta[0] >= 0 else \
@@ -26,8 +26,8 @@ def generate(z_lastD, nums_z_lastD, z_nowD, nums_z_nowD, Vx_thre, Vy_thre):
                      -Vy_max if abs(z_delta[1]) > Vy_max and z_delta[1] < 0 else z_delta[1]
                 m = [z_nowD[0, i], vx, z_nowD[1, i], vy]
                 m_new.append(m)
-                w_new.append(0.2)
-                P_new.append(np.diag([1000, 100, 1000, 100]))
+                w_new.append(0.01)
+                P_new.append(np.diag([100, 400, 100, 400]))
 
     # 转为numpy数组
     w_new = np.array(w_new)
@@ -37,16 +37,17 @@ def generate(z_lastD, nums_z_lastD, z_nowD, nums_z_nowD, Vx_thre, Vy_thre):
     return w_new, m_new, P_new, J_new
 
 def UKFpart(X_fusion_pre, P_fusion_pre, R, x_radar, y_radar):
-    Variable_dimension = X_fusion_pre.shape[0]      #粒子的个数
-    Z_ob_diffusion = np.zeros((2 * Variable_dimension + 1 , 2))
-    w_m =  np.zeros((2 * Variable_dimension + 1 , 1))
-    w_p = np.zeros((2 * Variable_dimension + 1 , 1))
+    n_num = X_fusion_pre.shape[0]      #粒子的维度
+    Z_ob_diffusion = np.zeros((2 * n_num + 1 , 2))
+    w_m =  np.zeros((2 * n_num + 1 , 1))
+    w_p = np.zeros((2 * n_num + 1 , 1))
+
     alpha = 0.1
     beta = 2
     kap = 0
-    lam = (alpha ** 2) * (Variable_dimension + kap) - Variable_dimension
+    lam = (alpha ** 2) * (n_num + kap) - n_num
 
-    X_pre_diffusion = np.zeros((2 * Variable_dimension + 1 , 4))
+    X_pre_diffusion = np.zeros((2 * n_num + 1 , 4))
     X_pre_diffusion[0] = X_fusion_pre
 
     try:
@@ -58,22 +59,23 @@ def UKFpart(X_fusion_pre, P_fusion_pre, R, x_radar, y_radar):
         H = Vt.T @ np.diag(S) @ Vt
         P_fusion_pre = (P_fusion_pre + P_fusion_pre.T + H + H.T) / 4
     
-    degree_diffusion = np.real(sqrtm((Variable_dimension + lam) * P_fusion_pre)).T
+    degree_diffusion = np.real(sqrtm((n_num + lam) * P_fusion_pre)).T
     
-    for i in range(Variable_dimension):
+    for i in range(n_num):
         X_pre_diffusion[i + 1] = X_fusion_pre + degree_diffusion[i]
-        X_pre_diffusion[i + 1 + Variable_dimension] = X_fusion_pre - degree_diffusion[i]
+        X_pre_diffusion[i + 1 + n_num] = X_fusion_pre - degree_diffusion[i]
 
-    w_m[0] = lam / (Variable_dimension + lam)
-    w_p[0] = lam / (Variable_dimension + lam) + (1 - alpha ** 2 + beta)
+    w_m[0] = lam / (n_num + lam)
+    w_p[0] = lam / (n_num + lam) + (1 - alpha ** 2 + beta)
 
-    for i in range(2 * Variable_dimension):
-        w_m[i + 1] = 1 / (2 * (Variable_dimension + lam))
-        w_p[i + 1] = 1 / (2 * (Variable_dimension + lam))
+    for i in range(2 * n_num):
+        w_m[i + 1] = 1 / (2 * (n_num + lam))
+        w_p[i + 1] = 1 / (2 * (n_num + lam))
               
-    for i in range(2 * Variable_dimension + 1):
-        Z_ob_diffusion[i] = np.sqrt((X_pre_diffusion[i, 1] - x_radar) ** 2 + (X_pre_diffusion[i, 3] - y_radar) ** 2) 
-        theta_sus_head = np.rad2deg(np.arctan((X_pre_diffusion[i, 3] - y_radar) / (X_pre_diffusion[i, 1] - x_radar)))
+    #计算撒点的观测值
+    for i in range(2 * n_num + 1):    
+        Z_ob_diffusion[i, 0] = np.sqrt((X_pre_diffusion[i, 0] - x_radar) ** 2 + (X_pre_diffusion[i, 2] - y_radar) ** 2)  #距离
+        theta_sus_head = np.rad2deg(np.arctan((X_pre_diffusion[i, 2] - y_radar) / (X_pre_diffusion[i, 0] - x_radar)))
 
         if np.logical_and(X_pre_diffusion[i, 0] - x_radar >= 0, X_pre_diffusion[i, 2] - y_radar >= 0):
             Z_ob_diffusion[i, 1] = theta_sus_head
@@ -84,33 +86,31 @@ def UKFpart(X_fusion_pre, P_fusion_pre, R, x_radar, y_radar):
         elif np.logical_and(X_pre_diffusion[i, 0] - x_radar >= 0, X_pre_diffusion[i, 2] - y_radar < 0):
             Z_ob_diffusion[i, 1] = theta_sus_head + 360
 
-        #d_xy = np.sqrt( (X_pre_diffusion[i, 1] - self.x_agent) ** 2 + (X_pre_diffusion[i, 3]-  self.y_agent) ** 2)
-
     flag_jump = 0
     max_theta = 0
-    for i in range(1 , 2 * Variable_dimension + 1):
-        d_theta = abs(Z_ob_diffusion[1, 1] - Z_ob_diffusion[i, 1])
+    for i in range(1 , 2 * n_num + 1):
+        d_theta = abs(Z_ob_diffusion[0, 1] - Z_ob_diffusion[i, 1])
         if d_theta > max_theta:
             max_theta = d_theta
     
     if max_theta > 180:
-        for i in range(2 * Variable_dimension + 1):
+        for i in range(2 * n_num + 1):
             if Z_ob_diffusion[i, 1] > 270:
-                Z_ob_diffusion[i, 1] = Z_ob_diffusion[i, 1]
+                Z_ob_diffusion[i, 1] = Z_ob_diffusion[i, 1] - 360
         flag_jump = 1
 
-    #Z_fusion_ob = np.zeros((2, 1))
     Z_fusion_ob = np.zeros((1, 2))
 
-    for i in range(2 * Variable_dimension + 1):
+    for i in range(2 * n_num + 1):
         Z_fusion_ob = Z_fusion_ob + w_m[i] * Z_ob_diffusion[i]
     
     P_fusion_ob = R
-    for i in range(2 * Variable_dimension + 1):       
+    for i in range(2 * n_num + 1):       
         P_fusion_ob = P_fusion_ob + w_p[i] * (Z_ob_diffusion[i] - Z_fusion_ob).T @ (Z_ob_diffusion[i] - Z_fusion_ob) #2×2
     
     Pzx = np.zeros((4, 2))
-    for i in range(2 * Variable_dimension + 1):
+    for i in range(2 * n_num + 1):
+        #X_fusion_pre状态向量的预测，X_pre_diffusion粒子散布
         Pzx += w_p[i] * (X_fusion_pre - X_pre_diffusion[i]).reshape(4, 1) @ (Z_fusion_ob - Z_ob_diffusion[i])#
 
     k_ukf = Pzx @ (np.linalg.inv(P_fusion_ob))
@@ -118,6 +118,8 @@ def UKFpart(X_fusion_pre, P_fusion_pre, R, x_radar, y_radar):
     Pnew = P_fusion_pre - k_ukf @ P_fusion_ob @ k_ukf.T
 
     return Z_fusion_ob, P_fusion_ob, k_ukf, Pnew, flag_jump
+
+
 
 def M_UKF(X_fusion_pre, Z_polar, Z_fusion_ob, k_ukf, flag_jump):
     """
@@ -131,32 +133,32 @@ def M_UKF(X_fusion_pre, Z_polar, Z_fusion_ob, k_ukf, flag_jump):
     - X_ukf: 更新后的状态
     """
    
-    complement = np.array([0.0, 360.0])
-    delta_angle = Z_polar[1] - Z_fusion_ob[0, 1]
+    complement = np.array([0.0, 360.0]).reshape(2, 1)
+    Z_polar = Z_polar.reshape(2, 1)
+    Z_fusion_ob = Z_fusion_ob.reshape(2, 1)
+    angle_obs = Z_polar[1, 0]    # 第2行第1列
+    angle_pred = Z_fusion_ob[1, 0]
+    delta_angle = Z_polar[1, 0] - Z_fusion_ob[1, 0]
 
     if abs(delta_angle) > 180 and flag_jump == 0:
         if delta_angle < 0:
-            correction = Z_polar - Z_fusion_ob + complement
+            X_ukf = X_fusion_pre.reshape(4, 1) + k_ukf @ (Z_polar - Z_fusion_ob + complement)
         else:
-            correction = Z_polar - (Z_fusion_ob + complement)
+            X_ukf = X_fusion_pre.reshape(4, 1) + k_ukf @ (Z_polar - (Z_fusion_ob + complement))
     elif abs(delta_angle) > 180 and flag_jump == 1:
-        correction = Z_polar - (Z_fusion_ob + complement)
+        X_ukf = X_fusion_pre.reshape(4, 1) + k_ukf @ (Z_polar - (Z_fusion_ob + complement))
     else:
-        correction = Z_polar - Z_fusion_ob
+        X_ukf = X_fusion_pre.reshape(4, 1) + k_ukf @ (Z_polar - Z_fusion_ob).reshape(2, 1)
 
-    # 状态更新
-    X_ukf = X_fusion_pre.reshape(4, 1) + k_ukf @ correction.T 
     X_ukf = X_ukf.flatten()
     #print(X_ukf)
     return X_ukf
 
 def State_extraction(X_now):
     state_draw_list = []
-
-    # weights = X_now[0][0]  # 权重列表
-    # means = X_now[0][1]    # 均值列表
+    
     weights = X_now[0]  # 权重列表
-    means = X_now[1]  
+    means = X_now[1]  # 均值列表
 
 
     for w, m in zip(weights, means):
@@ -171,7 +173,7 @@ def State_extraction(X_now):
 
 
 class PHD():
-    def __init__(self, params, z_lastD, z_nowD, z_nowP, X_last):
+    def __init__(self, params):
         """
         初始化滤波器参数
         - model_params: z_lastD笛卡尔坐标系下上时刻的观测
@@ -183,8 +185,8 @@ class PHD():
         self.Ps = 1
         self.Pd = params["Pd"]           #检测概率
         self.R = params["obverser_R"]    #观测误差矩阵
-        self.Vx_thre = 50
-        self.Vy_thre = 50
+        self.Vx_thre = 8
+        self.Vy_thre = 8
         self.x_agent = params['x_agent']
         self.y_agent = params['y_agent']
         self.Zr = params["Zr"]           #杂波强度
@@ -192,8 +194,9 @@ class PHD():
                             [0, 1, 0, 0],
                             [0, 0, 1, self.T],
                             [0, 0, 0, 1]])
-        self.Q = np.diag([1, 0.1, 1, 0.1])   
-
+        self.Q = np.diag([1, 0.01, 1, 0.01])   
+    
+    def init_params(self, z_lastD, z_nowD, z_nowP, X_last):
         self.z_lastD = z_lastD
         self.nums_z_lastD = len(self.z_lastD)
         self.z_nowD = z_nowD
@@ -201,18 +204,11 @@ class PHD():
         self.z_nowP = z_nowP
         self.X_last = X_last    
 
-        #self.X_last = [[], [], [], []]    
-
         self.w_priori = self.X_last[0]  # 上一时刻权重
         self.m_priori = self.X_last[1]  # 均值
         self.P_priori = self.X_last[2]  # 协方差
         self.J_priori = self.X_last[3]  # 先验粒子数量
 
-        #self.Z_obpre = []
-
-        self.w_new, self.m_new, self.P_new, self.J_new = generate(
-            self.z_lastD, self.nums_z_lastD, self.z_nowD, self.nums_z_nowD, self.Vx_thre, self.Vy_thre
-        )
 
     def predict_update(self):
         total = self.J_new + self.J_priori
@@ -244,19 +240,16 @@ class PHD():
 
         J_pre = total       #预测的粒子数量
         if J_pre == 0:
-            # W_phd = []
-            # M_phd = []
-            # P_phd = []
-            # e = 0
             return [[], [], [], 0]
+        
         else:
             Z_obpre = []
             P_z = []
             K_ukf = []
             P_ukf = []
 
-            for i in range(J_pre):
-                w_pos.append((1 - self.Pd) * np.array(w_pre[i]))
+            for i in range(J_pre):#未被检测到的部分
+                w_pos.append((1 - self.Pd) * w_pre[i])
                 m_pos.append(m_pre[i])
                 P_pos.append(P_pre[i])
 
@@ -307,10 +300,10 @@ class PHD():
                 else:
                     w_sum = sum(updated_weights)
         
-                    updated_weights = [self.Pd * w / ((self.Zr / (2000**2)) + w_sum) for w in updated_weights]
+                    updated_weights = [self.Pd * w / ((self.Zr / (900**2)) + w_sum) for w in updated_weights]
                     w_pos[e*J_pre - J_pre:e*J_pre] = updated_weights
 
-            J_pos = e * J_pre + J_pre
+            J_pos = e * J_pre + J_pre  #存疑
 
 
             # ------- 剪枝 -------
@@ -325,7 +318,7 @@ class PHD():
                     P_select.append(P_pos[i])
 
             # ------- 融合 -------
-            U = 135
+            U = 50
             used = [False] * len(W_select)
             X_now = []
 
@@ -387,7 +380,7 @@ class PHD():
                     used[k] = True
 
             # ------- 裁剪 -------
-            Jmax = 200
+            Jmax = 150
             if len(W_phd) > Jmax:
                 sorted_indices = sorted(range(len(W_phd)), key=lambda i: W_phd[i], reverse=True)
                 top_indices = sorted_indices[:Jmax]
@@ -400,10 +393,7 @@ class PHD():
             # return X_now      
                  
             return [W_phd, M_phd, P_phd, len(W_phd)] 
-             
-            
-            
-            # ------- 最终输出赋值 -------
+
 
 
                     

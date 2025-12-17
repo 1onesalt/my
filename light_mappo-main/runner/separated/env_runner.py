@@ -104,7 +104,7 @@ class EnvRunner(Runner):
 
     def warmup(self):
         # reset env
-        obs = self.envs.reset()  # shape = [env_num, agent_num, obs_dim]
+        obs = self.envs.reset()  #环境个数、智能体个数、观测维度 shape = [env_num, agent_num, obs_dim]
 
         share_obs = []
         for o in obs:

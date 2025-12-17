@@ -47,6 +47,7 @@ class DummyVecEnv():
 
     def reset(self):
         obs = [env.reset() for env in self.envs] # [env_num, agent_num, obs_dim]
+        print("envs reset obs shape:", np.array(obs).shape)
         return np.array(obs)
 
     def close(self):

@@ -11,7 +11,7 @@ def _cast(x):
     return x.transpose(1,0,2).reshape(-1, *x.shape[2:])
 
 class SeparatedReplayBuffer(object):
-    def __init__(self, args, obs_space, share_obs_space, act_space):
+    def __init__(self, args, obs_space, share_obs_space, act_space):   # 初始化缓冲区
         self.episode_length = args.episode_length
         self.n_rollout_threads = args.n_rollout_threads
         self.rnn_hidden_size = args.hidden_size
@@ -25,16 +25,31 @@ class SeparatedReplayBuffer(object):
 
         obs_shape = get_shape_from_obs_space(obs_space)
         share_obs_shape = get_shape_from_obs_space(share_obs_space)
+        
+        # if type(obs_shape[-1]) == list:
+        #     obs_shape = obs_shape[:1]
 
-        if type(obs_shape[-1]) == list:
-            obs_shape = obs_shape[:1]
+        # if type(share_obs_shape[-1]) == list:
+        #     share_obs_shape = share_obs_shape[:1]
 
-        if type(share_obs_shape[-1]) == list:
-            share_obs_shape = share_obs_shape[:1]
+        # self.share_obs = np.zeros((self.episode_length + 1, self.n_rollout_threads, *share_obs_shape), dtype=np.float32)
+        # self.obs = np.zeros((self.episode_length + 1, self.n_rollout_threads, *obs_shape), dtype=np.float32)
 
-        self.share_obs = np.zeros((self.episode_length + 1, self.n_rollout_threads, *share_obs_shape), dtype=np.float32)
-        self.obs = np.zeros((self.episode_length + 1, self.n_rollout_threads, *obs_shape), dtype=np.float32)
 
+
+        self.share_obs = {
+            k: np.zeros((self.episode_length + 1, self.n_rollout_threads, *v), dtype=np.float32)
+            for k, v in share_obs_shape.items()
+        }
+
+        self.obs = {
+            k: np.zeros((self.episode_length + 1, self.n_rollout_threads, *v), dtype=np.float32)
+            for k, v in obs_shape.items()
+        }
+
+
+
+        
         self.rnn_states = np.zeros((self.episode_length + 1, self.n_rollout_threads, self.recurrent_N, self.rnn_hidden_size), dtype=np.float32)
         self.rnn_states_critic = np.zeros_like(self.rnn_states)
 
@@ -58,6 +73,7 @@ class SeparatedReplayBuffer(object):
 
         self.step = 0
 
+    # 插入新的轨迹数据
     def insert(self, share_obs, obs, rnn_states, rnn_states_critic, actions, action_log_probs,
                value_preds, rewards, masks, bad_masks=None, active_masks=None, available_actions=None):
         self.share_obs[self.step + 1] = share_obs.copy()
@@ -98,6 +114,7 @@ class SeparatedReplayBuffer(object):
 
         self.step = (self.step + 1) % self.episode_length
     
+    # 更新后处理
     def after_update(self):
         self.share_obs[0] = self.share_obs[-1].copy()
         self.obs[0] = self.obs[-1].copy()
@@ -115,6 +132,7 @@ class SeparatedReplayBuffer(object):
         self.masks[0] = self.masks[-1].copy()
         self.bad_masks[0] = self.bad_masks[-1].copy()
 
+    # 计算回报
     def compute_returns(self, next_value, value_normalizer=None):
         if self._use_proper_time_limits:
             if self._use_gae:
@@ -158,7 +176,8 @@ class SeparatedReplayBuffer(object):
                 self.returns[-1] = next_value
                 for step in reversed(range(self.rewards.shape[0])):
                     self.returns[step] = self.returns[step + 1] * self.gamma * self.masks[step + 1] + self.rewards[step]
-
+    
+    # 生成训练批次
     def feed_forward_generator(self, advantages, num_mini_batch=None, mini_batch_size=None):
         episode_length, n_rollout_threads = self.rewards.shape[0:2]
         batch_size = n_rollout_threads * episode_length
@@ -285,7 +304,8 @@ class SeparatedReplayBuffer(object):
             adv_targ = _flatten(T, N, adv_targ)
 
             yield share_obs_batch, obs_batch, rnn_states_batch, rnn_states_critic_batch, actions_batch, value_preds_batch, return_batch, masks_batch, active_masks_batch, old_action_log_probs_batch, adv_targ, available_actions_batch
-
+    
+    # 生成 RNN 训练批次
     def recurrent_generator(self, advantages, num_mini_batch, data_chunk_length):
         episode_length, n_rollout_threads = self.rewards.shape[0:2]
         batch_size = n_rollout_threads * episode_length

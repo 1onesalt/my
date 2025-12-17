@@ -3,7 +3,7 @@ import logging
 import random
 import gym
 import numpy as np
-import torch
+
 from gym.spaces import Dict, Box
 
 from MY_ENV.utils.action_space import MultiAgentActionSpace
@@ -13,13 +13,13 @@ from MY_ENV.utils.draw import draw_grid, fill_cell, write_cell_text
 from gym import spaces
 from gym.utils import seeding
 from MY_ENV.envs.target_model2 import model, targets, target_CV, observe_Fov, polar2dicaer
-from MY_ENV.envs.PHD import PHD, State_extraction, generate
-from MY_ENV.envs.phd_utils import PHDFeatureExtractor
+from MY_ENV.envs.PHD import PHD, State_extraction
+from phd_utils import PHDFeatureExtractor
 
 class target_search(gym.Env):
     def __init__(self, x_min = -1000, x_max = 1000, y_min = -1000, y_max = 1000, n_agent = 3, n_target = 5, max_steps = 100):
         # 环境参数
-        self.x_min = x_min          #环境边界
+        self.x_min = x_min          
         self.x_max = x_max
         self.y_min = y_min
         self.y_max = y_max
@@ -28,14 +28,11 @@ class target_search(gym.Env):
         self.max_steps = max_steps
         self.agent_step_size = 7
 
-        # --- PHD 特征提取器配置 ---
-        self.phd_h = 64
-        self.phd_w = 64
         phd_config = {
-            'cnn_h': self.phd_h,       # 张量高度
-            'cnn_w': self.phd_w,       # 张量宽度
-            'r_max': 800.0,            # 视域半径
-            'max_speed': 10.0          # 估计的最大目标速度，用于归一化
+            'cnn_h': 64,       # 张量高度 (Distance bins)，建议 64 或 84
+            'cnn_w': 64,       # 张量宽度 (Azimuth bins)，建议 64 或 84
+            'r_max': 800.0,    # 对应 target_model2.py 中的 obverser_d
+            'max_speed': 10.0  # 估计的最大目标速度，用于归一化
         }
         self.feature_extractor = PHDFeatureExtractor(phd_config, device='cpu')
 
@@ -48,25 +45,27 @@ class target_search(gym.Env):
         # 初始化为空的数据结构
         self.state = None
         self.agent_pos = None
-        self.agent_headings = None  #智能体朝向
         self.agent_Z_dicaer = None
         self.utility_map = None
-
+        self.target_obs = None
 
         # 观测空间相关参数
         self.utility_channel = 2
         self.utilityMap_M = 20     
         self.utilityMap_N = 20 
         self.utility_obs_shape = (self.utility_channel, self.utilityMap_M, self.utilityMap_N)
- 
-        self.heatmap_shape = (3, self.phd_h, self.phd_w)        #PHD 热力图形状
 
+        self.channel = 3                  
+        self.ring_num = 4     
+        self.sector_num = 8
+        self.target_obs_shape = (self.channel, self.ring_num, self.sector_num) 
+ 
         self.observation_space = MultiAgentObservationSpace([
             Dict({
-                'phd_heatmap': Box(
-                    low=-np.inf, 
-                    high=np.inf, # log变换后范围可能较大，或者使用 low=-1, high=1 如果只看速度通道
-                    shape=self.heatmap_shape,
+                'target': Box(
+                    low=-np.inf,
+                    high=np.inf,
+                    shape=self.target_obs_shape,
                     dtype=np.float32
                 ),
                 'utility': Box(
@@ -89,30 +88,27 @@ class target_search(gym.Env):
             [spaces.Discrete(9) for _ in range(self.n_agents)]
         )
 
-    
+    #主要步骤代码
     def reset(self):
-        """
-        重置环境状态:
-        1、目标轨迹的重置
-        2、智能体位置的重置(状态)
-        3、智能体观测的重置(热力图观测(phd状态)、效用图观测、自身位置)，并获取初始观测
-        4、回合数、步数、奖励重置
-        """
-
-        #回合数、步数、奖励重置
+        # 重置环境状态
         self.done = False
         self.step_count = 0
         self.total_rewad = [0.0 for _ in range(self.n_agents)]
 
-        # 智能体观测的重置
+        # 重置智能体位置和观测数据
         self.agent_pos = {i: None for i in range(self.n_agents)}
-        self.agent_headings = {i: 0.0 for i in range(self.n_agents)} # 初始朝向 0度 (正右/东)
         self.agent_Z_dicaer = [[[], []] for _ in range(self.n_agents)]
+
+        # 重置效用图和目标观测
         self.utility_map = {
-            i: np.ones((self.utility_channel, self.utilityMap_M, self.utilityMap_N), dtype=np.float32) 
+            i: np.zeros((self.utility_channel, self.utilityMap_M, self.utilityMap_N), dtype=np.float32) 
             for i in range(self.n_agents)
         }
-
+        self.target_obs = {
+            i: np.zeros((self.channel, self.ring_num, self.sector_num), dtype=np.float32)
+            for i in range(self.n_agents)
+        }
+        # 重置 PHD 状态
         self.state = [
             [
                 0,                      # 权重
@@ -121,17 +117,15 @@ class target_search(gym.Env):
                 0                      # 粒子数量
             ] for _ in range(self.n_agents)
         ]
-
+        print("初始化PHD状态:", self.state)
         # 获取轨迹并初始化
         self.trajectories = self.init_targrt()
 
-        #获取初始观测
         observations = []
         for i in range(self.n_agents):
             # 获取当前位置和模型数据
             pos = self.agent_pos[i]
-            heading = self.agent_headings[i]
-            model_data = model(pos[0], pos[1], self.max_steps)
+            model_data = model(pos[0], pos[1])
 
             for j in range(2):
                 z_polar = observe_Fov(model_data, self.trajectories[j])   #极坐标观测数据
@@ -139,32 +133,29 @@ class target_search(gym.Env):
                 self.agent_Z_dicaer[i][j] = Z_dicaer           #获得智能体前两个时刻的直角坐标观测
 
             # PHD 更新
-            phd = PHD(model_data)
-            phd.init_params(self.agent_Z_dicaer[i][0], self.agent_Z_dicaer[i][1], z_polar, self.state[i])
-            phd.w_new, phd.m_new, phd.P_new, phd.J_new = generate(phd.z_lastD, phd.nums_z_lastD, phd.z_nowD, phd.nums_z_nowD, phd.Vx_thre, phd.Vy_thre)
+            phd = PHD(model_data, self.agent_Z_dicaer[i][0], self.agent_Z_dicaer[i][1], z_polar, self.state[i])
             X_now = phd.predict_update()
             print( "第{}个智能体的目标状态: {}".format(i, X_now) )
             self.state[i] = X_now
+        
+            state_draw, num_draw = State_extraction(X_now)    #这里得到的就是粒子状态和粒子数量
 
-            # --- 1. 生成新的 PHD 热力图观测 (CNN Input) ---
-            agent_pose = [pos[0], pos[1], heading]
-            obs_tensor = self.feature_extractor.process(X_now, agent_pose)  # process 返回的是 Torch Tensor (3, 64, 64)
-            phd_heatmap_np = obs_tensor.cpu().numpy()  # 转为 Numpy 数组以符合 Gym 规范
+            # 构建观测
+            target_obs = self.build_target_obs(pos, state_draw, self.ring_num, self.sector_num, self.channel, model_data["obverser_d"])
+            self.target_obs[i] = target_obs
 
             # 更新效用图
-            self.utility_map[i], _ = self.update_utility_map_vectorized(
-                            self.utility_map[i], pos, model_data["obverser_d"], 0.8,
-                            self.x_min, self.x_max, self.y_min, self.y_max
-                        )
+            self.utility_map[i] = self.update_utility_map_vectorized(self.utility_map[i], pos, model_data["obverser_d"], 0.8,
+                                  self.x_min, self.x_max, self.y_min, self.y_max)
+            # 然后叠加agent位置mask，生成最终观测的utility通道输入
             utility_obs = self.build_utility_obs(pos, self.utility_map[i])
             
             obs = {
-                'phd_heatmap': phd_heatmap_np,  
+                'target': target_obs,  
                 'utility': utility_obs,  
                 'self_pos': np.array(pos, dtype=np.float32)
             }
             observations.append(obs)
-
         print("环境重置完成，所有智能体已初始化。")
         return observations
     
@@ -173,9 +164,7 @@ class target_search(gym.Env):
         输入: actions - 每个智能体的动作列表   actions 是一个长度等于智能体数量的列表（或元组），每个元素是该智能体在当前时间步执行的离散动作索引
         返回: (obs_n, rewards, dones, infos)
         """
-        # 防止越界读取轨迹
-        if self.step_count < self.max_steps - 1:
-            self.step_count += 1
+        self.step_count += 1
         obs_n = []
         rewards = []
         dones = []
@@ -183,17 +172,12 @@ class target_search(gym.Env):
 
         # 遍历每个智能体
         for i in range(self.n_agents):
-            action = actions[i] 
-
             # 1. 更新智能体位置
             self.update_agent_pos(i, actions[i])
-            self._update_heading(i, action) #更新朝向
-
             pos = self.agent_pos[i]
-            heading = self.agent_headings[i]
             
             # 2. 获取观测数据
-            model_data = model(pos[0], pos[1], self.max_steps)
+            model_data = model(pos[0], pos[1])
             z_polar = observe_Fov(model_data, self.trajectories[self.step_count])
             Z_dicaer = polar2dicaer(z_polar, model_data)
 
@@ -202,37 +186,36 @@ class target_search(gym.Env):
             self.agent_Z_dicaer[i][1] = Z_dicaer
 
             # 4. PHD 滤波更新
-            phd = PHD(model_data)
-            phd.init_params(self.agent_Z_dicaer[i][0], self.agent_Z_dicaer[i][1], z_polar, self.state[i])
-            phd.w_new, phd.m_new, phd.P_new, phd.J_new = generate(phd.z_lastD, phd.nums_z_lastD, phd.z_nowD, phd.nums_z_nowD, phd.Vx_thre, phd.Vy_thre)
+            phd = PHD(model_data, self.agent_Z_dicaer[i][0], self.agent_Z_dicaer[i][1], 
+                    z_polar, self.state[i])
             X_now = phd.predict_update()
             self.state[i] = X_now
-
             state_draw, num_draw = State_extraction(X_now)
 
-            # --- 5. 生成 PHD 热力图观测 (Embedding Point) ---
-            agent_pose = [pos[0], pos[1], heading]
-            # 生成 Tensor 并转 Numpy
-            obs_tensor = self.feature_extractor.process(X_now, agent_pose)
-            phd_heatmap_np = obs_tensor.cpu().numpy()
+            # 5. 构建目标观测
+            target_obs = self.build_target_obs(
+                pos, state_draw, self.ring_num, self.sector_num, 
+                self.channel, model_data["obverser_d"]
+            )
+            self.target_obs[i] = target_obs
 
-
-            self.utility_map[i], search_utility_reward = self.update_utility_map_vectorized(
-                self.utility_map[i], pos, model_data["obverser_d"], 0.8, # 0.8参数在这里失效了，但为了接口兼容先留着
+            # 6. 更新效用图
+            self.utility_map[i] = self.update_utility_map_vectorized(
+                self.utility_map[i], pos, model_data["obverser_d"], 0.8,
                 self.x_min, self.x_max, self.y_min, self.y_max
             )
             utility_obs = self.build_utility_obs(pos, self.utility_map[i])
 
             # 7. 构建完整观测
             obs = {
-                'phd_heatmap': phd_heatmap_np,
+                'target': target_obs,
                 'utility': utility_obs,
                 'self_pos': np.array(pos, dtype=np.float32)
             }
             obs_n.append(obs)
 
             # 8. 计算奖励
-            reward = self.compute_reward(i, X_now, state_draw, actions[i], search_utility_reward)
+            reward = self.compute_reward(i, X_now, state_draw, actions[i])
             rewards.append(reward)
             self.total_rewad[i] += reward
 
@@ -244,7 +227,6 @@ class target_search(gym.Env):
             info = {
                 'step': self.step_count,
                 'agent_pos': pos,
-                'agent_heading': heading,
                 'num_targets': num_draw
             }
             infos.append(info)
@@ -254,38 +236,7 @@ class target_search(gym.Env):
 
         return obs_n, rewards, dones, infos
 
-    def _update_heading(self, agent_i, action):
-            """
-            根据动作更新智能体的朝向 (Heading)
-            只有在移动时才改变朝向，NOOP 保持原朝向
-            """
-            # 动作定义参考 ACTION_MEANING
-            # 0: UP (90度)
-            # 1: DOWN (-90度 或 270度)
-            # 2: LEFT (180度)
-            # 3: RIGHT (0度)
-            # 4: LEFT_UP (135度)
-            # 5: RIGHT_UP (45度)
-            # 6: LEFT_DOWN (-135度 或 225度)
-            # 7: RIGHT_DOWN (-45度 或 315度)
-            # 8: NOOP (保持不变)
-            
-            heading_map = {
-                0: 90.0,
-                1: -90.0,
-                2: 180.0,
-                3: 0.0,
-                4: 135.0,
-                5: 45.0,
-                6: -135.0,
-                7: -45.0
-            }
-            
-            if action in heading_map:
-                self.agent_headings[agent_i] = heading_map[action]
-
-
-    def compute_reward(self, agent_i, X_now, state_draw, action, search_utility_reward):
+    def compute_reward(self, agent_i, X_now, state_draw, action):
         """
         agent_i: 智能体索引
         X_now: 当前时刻PHD滤波输出的目标估计列表，格式包含状态和协方差，如 [(w, m, P, j), ...]
@@ -328,7 +279,28 @@ class target_search(gym.Env):
 
         cov_reward_total = np.sum(cov_rewards)
 
-        utility_reward = search_utility_reward * 0.01
+        # 2. 长期跟踪奖励
+        # if not hasattr(self, "tracking_steps"):
+        #     self.tracking_steps = {i: {} for i in range(self.n_agents)}
+
+        # detected_ids = set(range(len(state_draw))) 
+        # for tid in detected_ids:
+        #     self.tracking_steps[agent_i][tid] = self.tracking_steps[agent_i].get(tid, 0) + 1
+        # # 没检测到的目标重置计数
+        # for tid in list(self.tracking_steps[agent_i].keys()):
+        #     if tid not in detected_ids:
+        #         self.tracking_steps[agent_i][tid] = 0
+
+        # longtrack_reward = sum(0.05 * self.tracking_steps[agent_i][tid] for tid in detected_ids)
+
+        # 3. 搜索效用奖励
+        utility_map = self.utility_map[agent_i]
+        M, N = utility_map.shape[1], utility_map.shape[2]
+        x_idx = int((pos[0] - self.x_min) / (self.x_max - self.x_min) * M)
+        y_idx = int((pos[1] - self.y_min) / (self.y_max - self.y_min) * N)
+        x_idx = np.clip(x_idx, 0, M - 1)
+        y_idx = np.clip(y_idx, 0, N - 1)
+        utility_reward = np.sum(utility_map[:, x_idx, y_idx])
 
         # 4. 动作代价
         action_cost = 0.0 if action == 8 else -0.05
@@ -352,7 +324,7 @@ class target_search(gym.Env):
             dist_reward_total * 1.0 +
             cov_reward_total * 0.5 +
             # longtrack_reward +
-            utility_reward * 2 +
+            utility_reward * 0.3 +
             action_cost +
             discovery_reward +
             lost_penalty
@@ -371,13 +343,17 @@ class target_search(gym.Env):
                                                 self.x_min, self.x_max, 
                                                 self.y_min, self.y_max, 
                                                 noise=True)                    #trajectories是k时间步所有目标状态，targets_tracks是第i个目标所有时间的状态
-        
         for agent_i in range(self.n_agents):             #初始化每个agent的位置
             x = random.uniform(self.x_min, self.x_max)
             y = random.uniform(self.y_min, self.y_max)
             self.agent_pos[agent_i] = np.array([x, y])
             # 初始化每个agent的观测数据（用于生成新生分量）
-
+            self.agent_Z_dicaer[agent_i] = [[], []]
+            model_data = model(x, y)
+            for i in range(2):
+                z_polar = observe_Fov(model_data, trajectories[i])   #极坐标观测数据
+                Z_dicaer = polar2dicaer(z_polar, model_data)         #转化为直角坐标观测数据
+                self.agent_Z_dicaer[agent_i][i] = Z_dicaer           #获得智能体前两个时刻的直角坐标观测
         return trajectories 
 
     #更新智能体位置和观测
@@ -422,7 +398,7 @@ class target_search(gym.Env):
         # 更新位置
         self.agent_pos[agent_i] = (new_x, new_y)
 
-    def get_agent_obs(self, agent_i):   #？
+    def get_agent_obs(self, agent_i):
         """
         获取agent 的观测数据,包括通过phd获得状态估计和更新地图。
         """
@@ -503,7 +479,6 @@ class target_search(gym.Env):
             return action_meaning[agent_i]
         else:
             return action_meaning
-        
     def is_in_region(self, x, y, model_data, region_index, agent_pos):   #判断目标是否在指定的区域内
         """
         判断目标是否在指定的区域内,以agent为中心划分圆形区域。
@@ -541,6 +516,8 @@ class target_search(gym.Env):
         agent_pos: (x, y) 智能体位置
         targets: [(x, y), ...] 目标位置列表
         fov_radius: 视域半径
+        ring_num: 环数
+        channel: 每个扇区的通道数
         """
         # 8 扇区，每圈 8 个格子
         target_obs = np.zeros((channel, ring_num, sector_num), dtype=np.float32)
@@ -602,35 +579,19 @@ class target_search(gym.Env):
 
         # 计算到智能体的距离
         dist_map = np.sqrt((X - agent_pos[0])**2 + (Y - agent_pos[1])**2)
+
+        # 更新第一个通道（效用图）
         mask_in_view = dist_map <= view_radius
-
-        # 3. 计算【归一化】的覆盖奖励
-        # 3a. 计算理论最大格子数 (这是一个常数，可以预计算)
-        avg_resolution = (cell_size_x + cell_size_y) / 2.0
-        radius_in_grid = view_radius / avg_resolution
-        max_cells_in_view = np.pi * (radius_in_grid ** 2)
-        max_cells_in_view = max(max_cells_in_view, 1.0) # 防止除0
-
-        # 3b. 计算原始和
-        raw_reward_sum = np.sum(utility_map[0][mask_in_view])
-
-        # 3c. 归一化 (得到 0.0 ~ 1.0 之间的值)
-        normalized_reward = raw_reward_sum / max_cells_in_view
-
-        # 4. 更新地图
-        # A. 观测区：不确定性消除，重置为 0
-        utility_map[0][mask_in_view] = 0.0
-
-        # B. 未观测区：不确定性随着时间增长 (Time-Aging)
-        mask_not_in_view = ~mask_in_view
-        growth_rate = 0.01  # 每一步增长 0.01
-        utility_map[0][mask_not_in_view] += growth_rate
+        utility_map[0][mask_in_view] = 1.0
+        mask_decay = ~mask_in_view & (utility_map[0] > 0)
+        utility_map[0][mask_decay] *= decay_factor
         
-        # 限制最大值为 1.0
-        utility_map[0] = np.clip(utility_map[0], 0.0, 1.0)
+        print(f"Agent pos: {agent_pos}")
+        print(f"View radius: {view_radius}")
+        print(f"Cells in view: {np.sum(mask_in_view)}")
+        print(f"Non-zero cells: {np.sum(utility_map[0] > 0)}")
 
-        # 【修复】这里只返回一次，且返回的是归一化后的奖励
-        return utility_map, normalized_reward
+        return utility_map
     
 ACTION_MEANING = {
     0: "UP",

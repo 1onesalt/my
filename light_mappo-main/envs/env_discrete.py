@@ -9,7 +9,7 @@ import gym
 from gym import spaces
 import numpy as np
 from envs.env_core import EnvCore
-
+from gym.spaces import Dict, Box
 
 class DiscreteActionEnv(object):
     """
@@ -26,6 +26,22 @@ class DiscreteActionEnv(object):
 
         self.signal_obs_dim = self.env.obs_dim
         self.signal_action_dim = self.env.action_dim
+
+        # 观测空间相关参数
+        self.utility_channel = self.env.utility_channel
+        self.utilityMap_M = self.env.utilityMap_M     
+        self.utilityMap_N = self.env.utilityMap_N
+        self.utility_obs_shape = (self.utility_channel, self.utilityMap_M, self.utilityMap_N)
+
+        self.channel = self.env.channel                  
+        self.ring_num = self.env.ring_num
+        self.sector_num = self.env.sector_num
+        self.target_obs_shape = (self.channel, self.ring_num, self.sector_num) 
+
+        self.x_min = self.env.x_min
+        self.x_max = self.env.x_max
+        self.y_min = self.env.y_min
+        self.y_max = self.env.y_max
 
         # if true, action is a number 0...N, otherwise action is a one-hot N-dimensional vector
         #注意一下这两个参数
@@ -68,18 +84,59 @@ class DiscreteActionEnv(object):
             # observation space
             share_obs_dim += self.signal_obs_dim
             self.observation_space.append(  #也可以写一个字典，主要要明白代码在干一件什么样的事情
-                spaces.Box(
-                    low=-np.inf,
-                    high=+np.inf,
-                    shape=(self.signal_obs_dim,),
-                    dtype=np.float32,
-                )
-            )  # [-inf,inf]
+                Dict({
+                    'target': Box(
+                        low=-np.inf,
+                        high=np.inf,
+                        shape=self.target_obs_shape,
+                        dtype=np.float32
+                    ),
+                    'utility': Box(
+                        low=0.0,
+                        high=1.0,
+                        shape=self.utility_obs_shape,
+                        dtype=np.float32
+                    ),
+                    'self_pos': Box(
+                        low=np.array([self.x_min, self.y_min]),
+                        high=np.array([self.x_max, self.y_max]),
+                        shape=(2,),
+                        dtype=np.float32
+                    )
+                })
+            )  
 
         self.share_observation_space = [
-            spaces.Box(low=-np.inf, high=+np.inf, shape=(share_obs_dim,), dtype=np.float32)
+            Dict({
+            'target': Box(
+                low=-np.inf,
+                high=np.inf,
+                shape=self.target_obs_shape,
+                dtype=np.float32
+            ),
+            'utility': Box(
+                low=0.0,
+                high=1.0,
+                shape=self.utility_obs_shape,
+                dtype=np.float32
+            ),
+            'self_pos': Box(
+                low=np.array([self.x_min, self.y_min]),
+                high=np.array([self.x_max, self.y_max]),
+                shape=(2,),
+                dtype=np.float32
+            )
+        })
             for _ in range(self.num_agent)
         ]
+    
+
+        # 共享观测空间
+        if getattr(self.env, "share_observation_space", None) is not None:
+            self.share_observation_space = self.env.share_observation_space
+        else:
+            self.share_observation_space = self.observation_space
+
 
     def step(self, actions):
         """

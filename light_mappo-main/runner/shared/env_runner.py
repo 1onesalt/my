@@ -110,19 +110,61 @@ class EnvRunner(Runner):  #继承Runner
 
     def warmup(self):
         # reset env
-        obs = self.envs.reset()  # shape = [env_num, agent_num, obs_dim]
-
-        # replay buffer
-        if self.use_centralized_V:  #把agent的观测拼凑，智能体共享观测，也要赋值给agent的观测存起来
-            share_obs = obs.reshape(self.n_rollout_threads, -1)  # shape = [env_num, agent_num * obs_dim]
-            share_obs = np.expand_dims(share_obs, 1).repeat(
-                self.num_agents, axis=1
-            )  # shape = shape = [env_num, agent_num， agent_num * obs_dim]
-        else:
-            share_obs = obs
-
+        obs = self.envs.reset()  
+       
+        # # replay buffer
+        # if self.use_centralized_V:  
+        #     share_obs = obs.reshape(self.n_rollout_threads, -1)  
+        #     share_obs = np.expand_dims(share_obs, 1).repeat(     
+        #         self.num_agents, axis=1
+        #     )  
+        # else:
+        #     share_obs = obs
+ 
+        # #初始化缓冲区
+        # self.buffer.share_obs[0] = share_obs.copy()
+        # self.buffer.obs[0] = obs.copy()
+   
+    # 1. 遍历每个环境
+        share_obs = []
+        for env_obs in obs:
+            # env_obs是单个环境的观测数组：array([agent0_dict, agent1_dict, ...], dtype=object)
+            n_agents = len(env_obs)  # 该环境中的智能体数量
+            env_share_obs = []  # 存储当前环境中所有智能体的共享观测
+            
+            # 2. 收集当前环境中所有智能体的观测数据（按类型汇总）
+            all_targets = []    # 所有智能体的target观测
+            all_utilities = []  # 所有智能体的utility观测
+            all_self_pos = []   # 所有智能体的自身位置
+            for agent_dict in env_obs:
+                all_targets.append(agent_dict['target'])
+                all_utilities.append(agent_dict['utility'])
+                all_self_pos.append(agent_dict['self_pos'])
+            
+            # 3. 为每个智能体生成共享观测（包含所有智能体的信息）
+            for i in range(n_agents):
+                # 共享观测 = 所有智能体的target + 所有智能体的utility + 所有智能体的self_pos
+                # 这里将各部分数据拼接（具体拼接方式可根据模型需求调整）
+                share_target = np.concatenate(all_targets, axis=0)  # 拼接所有target（假设维度兼容）
+                share_utility = np.concatenate(all_utilities, axis=0)  # 拼接所有utility
+                share_self_pos = np.concatenate(all_self_pos, axis=0)  # 拼接所有self_pos
+                
+                # 合并为单个共享观测数组（可根据需求展平或保持多维）
+                agent_share_obs = np.concatenate([
+                    share_target,  # 展平为一维（或保留多维，视模型输入而定）
+                    share_utility,
+                    share_self_pos.flatten()
+                ])
+                
+                env_share_obs.append(agent_share_obs)
+            
+            # 4. 将当前环境的共享观测转换为numpy数组（保持与原始obs一致的容器类型）
+            env_share_obs_array = np.array(env_share_obs, dtype=object)
+            share_obs.append(env_share_obs_array)
+        #初始化缓冲区
         self.buffer.share_obs[0] = share_obs.copy()
         self.buffer.obs[0] = obs.copy()
+
 
     @torch.no_grad()
     def collect(self, step):   #看一下

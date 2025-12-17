@@ -16,9 +16,11 @@ import torch
 
 # Get the parent directory of the current file
 parent_dir = os.path.abspath(os.path.join(os.getcwd(), "."))
+# sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# # Append the parent directory to sys.path, otherwise the following import will fail
+# sys.path.append(parent_dir)
 
-# Append the parent directory to sys.path, otherwise the following import will fail
-sys.path.append(parent_dir)
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import get_config
 from envs.env_wrappers import DummyVecEnv
@@ -34,9 +36,6 @@ from envs.env_wrappers import DummyVecEnv
 def make_train_env(all_args):
     def get_env_fn(rank):
         def init_env():
-            # TODO 注意注意，这里选择连续还是离散可以选择注释上面两行，或者下面两行。
-            # from envs.env_continuous import ContinuousActionEnv
-            # env = ContinuousActionEnv()
 
             from envs.env_discrete import DiscreteActionEnv
             env = DiscreteActionEnv()  #创建环境，告诉环境动作空间维度、观测维度、共享观测维度
@@ -52,9 +51,6 @@ def make_train_env(all_args):
 def make_eval_env(all_args):
     def get_env_fn(rank):
         def init_env():
-            # TODO 注意注意，这里选择连续还是离散可以选择注释上面两行，或者下面两行。
-            # from envs.env_continuous import ContinuousActionEnv
-            # env = ContinuousActionEnv()
             from envs.env_discrete import DiscreteActionEnv
             env = DiscreteActionEnv()
             env.seed(all_args.seed + rank * 1000)

@@ -123,7 +123,7 @@ class RMAPPO():
 
         # Reshape to do in a single forward pass for all steps
         values, action_log_probs, dist_entropy = self.policy.evaluate_actions(share_obs_batch,
-                                                                              obs_batch,  ##这里类型要变为dict 类型
+                                                                              obs_batch,
                                                                               rnn_states_batch,
                                                                               rnn_states_critic_batch,
                                                                               actions_batch,

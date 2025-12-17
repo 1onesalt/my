@@ -33,8 +33,14 @@ def get_shape_from_obs_space(obs_space):
         obs_shape = obs_space.shape
     elif obs_space.__class__.__name__ == 'list':
         obs_shape = obs_space
+    elif obs_space.__class__.__name__ == 'Dict':
+        # 处理Dict类型的观察空间
+        obs_shape_dict = {key: get_shape_from_obs_space(space) 
+                          for key, space in obs_space.spaces.items()}
+        obs_shape = obs_shape_dict
+
     else:
-        raise NotImplementedError
+        raise NotImplementedError(f"Observation space of type {obs_space.__class__.__name__} not supported")
     return obs_shape
 
 def get_shape_from_act_space(act_space):
