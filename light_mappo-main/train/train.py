@@ -24,6 +24,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import get_config
 from envs.env_wrappers import DummyVecEnv
+from MY_ENV.envs.target_search import target_search
 
 """Train script for MPEs."""
 
@@ -37,8 +38,18 @@ def make_train_env(all_args):
     def get_env_fn(rank):
         def init_env():
 
-            from envs.env_discrete import DiscreteActionEnv
-            env = DiscreteActionEnv()  #创建环境，告诉环境动作空间维度、观测维度、共享观测维度
+            if all_args.env_name == "MyEnv":
+                env = target_search(
+                    n_agent=all_args.num_agents,
+                    max_steps=all_args.episode_length,
+                    # 如果需要，这里可以传入更多参数，如 x_min, x_max 等
+                )
+            else:
+                print("Can not support the " + all_args.env_name + " environment.")
+                raise NotImplementedError
+            
+            # from envs.env_discrete import DiscreteActionEnv
+            # env = DiscreteActionEnv()  #创建环境，告诉环境动作空间维度、观测维度、共享观测维度
 
             env.seed(all_args.seed + rank * 1000)
             return env
@@ -51,8 +62,20 @@ def make_train_env(all_args):
 def make_eval_env(all_args):
     def get_env_fn(rank):
         def init_env():
-            from envs.env_discrete import DiscreteActionEnv
-            env = DiscreteActionEnv()
+            if all_args.env_name == "MyEnv":
+                # [修改] 实例化评估环境
+                env = target_search(
+                    n_agent=all_args.num_agents,
+                    max_steps=all_args.episode_length
+                )
+            else:
+                print("Can not support the " + all_args.env_name + " environment.")
+                raise NotImplementedError
+
+            # from envs.env_discrete import DiscreteActionEnv
+            # env = DiscreteActionEnv()
+
+
             env.seed(all_args.seed + rank * 1000)
             return env
 

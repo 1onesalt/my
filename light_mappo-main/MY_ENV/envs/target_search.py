@@ -75,7 +75,7 @@ class target_search(gym.Env):
                     shape=self.utility_obs_shape,
                     dtype=np.float32
                 ),
-                'self_pos': Box(
+                'self_pos': Box(  #加一个朝向
                     low=np.array([self.x_min, self.y_min]),
                     high=np.array([self.x_max, self.y_max]),
                     shape=(2,),

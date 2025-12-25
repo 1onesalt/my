@@ -16,6 +16,57 @@ from algorithms.utils.popart import PopArt
 from utils.util import get_shape_from_obs_space
 
 
+class AdvancedCombinedExtractor(nn.Module):
+    def __init__(self, observation_space, features_dim=256):
+        super(AdvancedCombinedExtractor, self).__init__()
+        self._features_dim = features_dim
+        self.extractors = nn.ModuleDict()
+        total_concat_size = 0
+        
+        # 1. Heatmap 处理
+        n_channels_phd = observation_space['phd_heatmap'].shape[0]
+        self.extractors['phd_heatmap'] = nn.Sequential(
+            nn.Conv2d(n_channels_phd, 32, kernel_size=8, stride=4), nn.ReLU(),
+            nn.Conv2d(32, 64, kernel_size=4, stride=2), nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size=3, stride=1), nn.ReLU(),
+            nn.Flatten(),
+            nn.Linear(64 * 4 * 4, 128), nn.ReLU()
+        )
+        total_concat_size += 128
+
+        # 2. Utility 处理
+        n_channels_util = observation_space['utility'].shape[0]
+        self.extractors['utility'] = nn.Sequential(
+            nn.Conv2d(n_channels_util, 32, kernel_size=8, stride=4), nn.ReLU(),
+            nn.Conv2d(32, 64, kernel_size=4, stride=2), nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size=3, stride=1), nn.ReLU(),
+            nn.Flatten(),
+            nn.Linear(64 * 4 * 4, 128), nn.ReLU()
+        )
+        total_concat_size += 128
+
+        # 3. 自身位置处理
+        n_input_pos = observation_space['self_pos'].shape[0]
+        self.extractors['self_pos'] = nn.Sequential(
+            nn.Linear(n_input_pos, 64), nn.ReLU(),
+            nn.Linear(64, 64), nn.ReLU()
+        )
+        total_concat_size += 64
+        
+        self.final_out_dim = total_concat_size
+
+    def forward(self, observations):
+        return torch.cat([
+            self.extractors['phd_heatmap'](observations['phd_heatmap']),
+            self.extractors['utility'](observations['utility']),
+            self.extractors['self_pos'](observations['self_pos'])
+        ], dim=1)
+        
+    @property
+    def output_dim(self):
+        return self.final_out_dim
+
+
 class R_Actor(nn.Module):
     """
     Actor network class for MAPPO. Outputs actions given observations.
@@ -36,9 +87,12 @@ class R_Actor(nn.Module):
         self._recurrent_N = args.recurrent_N
         self.tpdv = dict(dtype=torch.float32, device=device)
 
-        obs_shape = get_shape_from_obs_space(obs_space)
-        base = CNNBase if len(obs_shape) == 3 else MLPBase
-        self.base = base(args, obs_shape)
+        # obs_shape = get_shape_from_obs_space(obs_space)
+        # base = CNNBase if len(obs_shape) == 3 else MLPBase
+        # self.base = base(args, obs_shape)
+
+        self.base = AdvancedCombinedExtractor(obs_space)
+        input_dim = self.base.output_dim
 
         if self._use_naive_recurrent_policy or self._use_recurrent_policy:
             self.rnn = RNNLayer(self.hidden_size, self.hidden_size, self._recurrent_N, self._use_orthogonal)
@@ -133,9 +187,12 @@ class R_Critic(nn.Module):
         self.tpdv = dict(dtype=torch.float32, device=device)
         init_method = [nn.init.xavier_uniform_, nn.init.orthogonal_][self._use_orthogonal]
 
-        cent_obs_shape = get_shape_from_obs_space(cent_obs_space)
-        base = CNNBase if len(cent_obs_shape) == 3 else MLPBase
-        self.base = base(args, cent_obs_shape)
+        # cent_obs_shape = get_shape_from_obs_space(cent_obs_space)
+        # base = CNNBase if len(cent_obs_shape) == 3 else MLPBase
+        # self.base = base(args, cent_obs_shape)
+
+        self.base = AdvancedCombinedExtractor(cent_obs_space)
+        input_dim = self.base.output_dim
 
         if self._use_naive_recurrent_policy or self._use_recurrent_policy:
             self.rnn = RNNLayer(self.hidden_size, self.hidden_size, self._recurrent_N, self._use_orthogonal)
@@ -170,3 +227,5 @@ class R_Critic(nn.Module):
         values = self.v_out(critic_features)
 
         return values, rnn_states
+
+
