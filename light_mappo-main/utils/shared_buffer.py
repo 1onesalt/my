@@ -48,23 +48,21 @@ class SharedReplayBuffer(object):
 
 
         #如果要区分智能体，要加一个self.n_agents,维度
-        self.share_obs = {
-            k: np.zeros(
-                (self.episode_length + 1, 
-                 self.n_rollout_threads, 
-                 *v), dtype=np.float32)
-            for k, v in share_obs_shape.items()
-        }
+        if isinstance(share_obs_shape, dict):
+            self.share_obs = {}
+            for k, v in share_obs_shape.items():
+                self.share_obs[k] = np.zeros(
+                    (self.episode_length + 1, self.n_rollout_threads, num_agents, *v),
+                    dtype=np.float32
+                )
 
-        self.obs = {
-            k: np.zeros(
-                (self.episode_length + 1, 
-                 self.n_rollout_threads, 
-                 *v), dtype=np.float32)
-            for k, v in obs_shape.items()
-        }
-
-
+        if isinstance(obs_shape, dict):
+            self.obs = {}
+            for k, v in obs_shape.items():
+                self.obs[k] = np.zeros(
+                    (self.episode_length + 1, self.n_rollout_threads, num_agents, *v),
+                    dtype=np.float32
+                )
 
 
         self.rnn_states = np.zeros(

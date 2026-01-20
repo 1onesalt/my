@@ -16,6 +16,18 @@ from runner.shared.base_runner import Runner
 def _t2n(x):
     return x.detach().cpu().numpy()
 
+# 新增：用于将字典的 batch 数据转换为 tensor 输入需要的格式
+def _flatten_dict_obs(obs_batch_dict):
+    """
+    将 buffer 中的字典数据 (Key -> [n_threads, n_agents, ...]) 
+    转换为网络需要的 (Key -> [n_threads * n_agents, ...])
+    """
+    flat_obs = {}
+    for k, v in obs_batch_dict.items():
+        # 假设 v 的形状是 [n_threads, n_agents, C, H, W] 或 [n_threads, n_agents, dim]
+        # 我们需要将其合并为 [n_threads * n_agents, ...]
+        flat_obs[k] = np.concatenate(v) 
+    return flat_obs
 
 class EnvRunner(Runner):  #继承Runner
     """Runner class to perform training, evaluation. and data collection for the MPEs. See parent class for details."""
@@ -24,7 +36,7 @@ class EnvRunner(Runner):  #继承Runner
         super(EnvRunner, self).__init__(config)
 
     def run(self):
-        self.warmup()
+        self.warmup()  #重置环境
 
         start = time.time()
         episodes = int(self.num_env_steps) // self.episode_length // self.n_rollout_threads
@@ -108,7 +120,7 @@ class EnvRunner(Runner):  #继承Runner
             if episode % self.eval_interval == 0 and self.use_eval:
                 self.eval(total_num_steps)
 
-    def warmup(self):
+    def warmup(self):  #初始化观测(从reset函数中获得)和共享观测（）并将他们放入到Replay Buffer 中
         # reset env
         obs = self.envs.reset()  
        
@@ -125,7 +137,7 @@ class EnvRunner(Runner):  #继承Runner
         # self.buffer.share_obs[0] = share_obs.copy()
         # self.buffer.obs[0] = obs.copy()
    
-    # 1. 遍历每个环境
+        # 1. 遍历每个环境
         share_obs = []
         for env_obs in obs:
             # env_obs是单个环境的观测数组：array([agent0_dict, agent1_dict, ...], dtype=object)
@@ -167,8 +179,21 @@ class EnvRunner(Runner):  #继承Runner
 
 
     @torch.no_grad()
-    def collect(self, step):   #看一下
+    def collect(self, step):   #
         self.trainer.prep_rollout()
+
+        obs_input = {}
+        for key, data in self.buffer.obs.items():
+            obs_input[key] = np.concatenate(data[step]) # 结果 shape: [n_rollout * n_agents, ...]
+
+        share_obs_input = {}
+        for key, data in self.buffer.share_obs.items():
+            share_obs_input[key] = np.concatenate(data[step])
+
+        rnn_states_input = np.concatenate(self.buffer.rnn_states[step])
+        rnn_states_critic_input = np.concatenate(self.buffer.rnn_states_critic[step])
+        masks_input = np.concatenate(self.buffer.masks[step])
+
         (
             value,
             action,
@@ -176,12 +201,13 @@ class EnvRunner(Runner):  #继承Runner
             rnn_states,
             rnn_states_critic,
         ) = self.trainer.policy.get_actions(
-            np.concatenate(self.buffer.share_obs[step]),
-            np.concatenate(self.buffer.obs[step]),
-            np.concatenate(self.buffer.rnn_states[step]),
-            np.concatenate(self.buffer.rnn_states_critic[step]),
-            np.concatenate(self.buffer.masks[step]),
+            share_obs_input,    # 修改点：传入字典
+            obs_input,          # 修改点：传入字典
+            rnn_states_input,
+            rnn_states_critic_input,
+            masks_input,
         )
+
         # [self.envs, agents, dim]
         values = np.array(np.split(_t2n(value), self.n_rollout_threads))  # [env_num, agent_num, 1]
         actions = np.array(np.split(_t2n(action), self.n_rollout_threads))  # [env_num, agent_num, action_dim]
@@ -249,6 +275,7 @@ class EnvRunner(Runner):  #继承Runner
             share_obs = np.expand_dims(share_obs, 1).repeat(self.num_agents, axis=1)
         else:
             share_obs = obs
+
 
         self.buffer.insert(
             share_obs,

@@ -28,7 +28,7 @@ class EnvRunner(Runner):
                     self.trainer[agent_id].policy.lr_decay(episode, episodes)
 
             for step in range(self.episode_length):
-                # Sample actions
+                # Sample actions决策
                 (
                     values,
                     actions,
@@ -38,7 +38,7 @@ class EnvRunner(Runner):
                     actions_env,
                 ) = self.collect(step)
 
-                # Obser reward and next obs
+                # Obser reward and next obs交互
                 obs, rewards, dones, infos = self.envs.step(actions_env)
 
                 data = (
@@ -53,7 +53,7 @@ class EnvRunner(Runner):
                     rnn_states_critic,
                 )
 
-                # insert data into buffer
+                # insert data into buffer存储
                 self.insert(data)
 
             # compute return and update network
@@ -130,7 +130,7 @@ class EnvRunner(Runner):
             self.trainer[agent_id].prep_rollout()
             value, action, action_log_prob, rnn_state, rnn_state_critic = self.trainer[
                 agent_id
-            ].policy.get_actions(
+            ].policy.get_actions(   #根据观测得到动作，策略网络
                 self.buffer[agent_id].share_obs[step],
                 self.buffer[agent_id].obs[step],
                 self.buffer[agent_id].rnn_states[step],
