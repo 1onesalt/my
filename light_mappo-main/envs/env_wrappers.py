@@ -5,7 +5,7 @@
 # @File    : env_wrappers.py
 Modified from OpenAI Baselines code to work with multi-agent envs
 """
-
+import gym
 import numpy as np
 
 # single env
@@ -62,3 +62,4 @@ class DummyVecEnv():
                 env.render(mode=mode)
         else:
             raise NotImplementedError
+    

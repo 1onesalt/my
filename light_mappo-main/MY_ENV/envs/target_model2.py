@@ -5,12 +5,12 @@ from typing import Tuple
 from math import atan2, degrees
 from scipy.linalg import sqrtm
 
-def model(x_agent, y_agent, num_scans):
+def model():
     model = {}
     model["obverser_d"] = 800             #观测半径
-    model['num_scans'] = num_scans
-    model['x_agent'] = x_agent
-    model['y_agent'] = y_agent
+    # model['num_scans'] = num_scans
+    # model['x_agent'] = x_agent
+    # model['y_agent'] = y_agent
 
     model["obverser_R"] = np.diag([0.5, 0.1])   #观测噪声协方差矩阵
     model["Zr"] = 2                         #杂波

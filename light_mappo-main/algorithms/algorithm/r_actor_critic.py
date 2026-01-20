@@ -15,6 +15,11 @@ from algorithms.utils.act import ACTLayer
 from algorithms.utils.popart import PopArt
 from utils.util import get_shape_from_obs_space
 
+# 在 r_actor_critic.py 头部导入
+from algorithms.utils.cnn import CNNBase # 确保导入了 FusionCNN
+from algorithms.utils.FusionCNN import FusionCNN
+from algorithms.utils.mlp import MLPBase
+
 
 class AdvancedCombinedExtractor(nn.Module):
     def __init__(self, observation_space, features_dim=256):
@@ -23,44 +28,52 @@ class AdvancedCombinedExtractor(nn.Module):
         self.extractors = nn.ModuleDict()
         total_concat_size = 0
         
-        # 1. Heatmap 处理
-        n_channels_phd = observation_space['phd_heatmap'].shape[0]
-        self.extractors['phd_heatmap'] = nn.Sequential(
-            nn.Conv2d(n_channels_phd, 32, kernel_size=8, stride=4), nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=4, stride=2), nn.ReLU(),
-            nn.Conv2d(64, 64, kernel_size=3, stride=1), nn.ReLU(),
-            nn.Flatten(),
-            nn.Linear(64 * 4 * 4, 128), nn.ReLU()
-        )
-        total_concat_size += 128
-
-        # 2. Utility 处理
-        n_channels_util = observation_space['utility'].shape[0]
-        self.extractors['utility'] = nn.Sequential(
-            nn.Conv2d(n_channels_util, 32, kernel_size=8, stride=4), nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=4, stride=2), nn.ReLU(),
-            nn.Conv2d(64, 64, kernel_size=3, stride=1), nn.ReLU(),
-            nn.Flatten(),
-            nn.Linear(64 * 4 * 4, 128), nn.ReLU()
-        )
-        total_concat_size += 128
-
-        # 3. 自身位置处理
-        n_input_pos = observation_space['self_pos'].shape[0]
-        self.extractors['self_pos'] = nn.Sequential(
-            nn.Linear(n_input_pos, 64), nn.ReLU(),
-            nn.Linear(64, 64), nn.ReLU()
-        )
-        total_concat_size += 64
+# --- 硬编码维度 (无 Utility) ---
+        self.phd_shape = (3, 64, 64) 
+        self.pos_shape = (2,)
         
-        self.final_out_dim = total_concat_size
+        self.phd_dim = 3 * 64 * 64
+        self.pos_dim = 2
+        
+        # 1. CNN 模块 (论文: "CNN前端由三层卷积层构成")
+        # 仅处理 PHD 热力图 (3通道)
+        self.cnn = nn.Sequential(
+            nn.Conv2d(3, 32, kernel_size=8, stride=4), nn.ReLU(),
+            nn.Conv2d(32, 64, kernel_size=4, stride=2), nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size=3, stride=1), nn.ReLU(),
+            nn.Flatten(),
+            nn.Linear(64 * 4 * 4, 128), nn.ReLU()
+        )
+        self.cnn_out_dim = 128
+
+        # 2. 特征融合 MLP (论文: "与自身状态向量拼接...输入至全连接层")
+        self.fusion_input_dim = self.cnn_out_dim + self.pos_dim
+        
+        self.fusion_mlp = nn.Sequential(
+            nn.Linear(self.fusion_input_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, 128), 
+            nn.ReLU()
+        )
+        self.final_out_dim = 128
 
     def forward(self, observations):
-        return torch.cat([
-            self.extractors['phd_heatmap'](observations['phd_heatmap']),
-            self.extractors['utility'](observations['utility']),
-            self.extractors['self_pos'](observations['self_pos'])
-        ], dim=1)
+# 1. 还原切片
+        # 前面部分是 PHD Map
+        obs_phd = observations[:, :self.phd_dim].view(-1, *self.phd_shape)
+        # 后面部分是 Pos
+        obs_pos = observations[:, self.phd_dim:]
+        
+        # 2. CNN 提取空间特征
+        cnn_feat = self.cnn(obs_phd)
+        
+        # 3. 拼接 (Concat)
+        fusion_input = torch.cat([cnn_feat, obs_pos], dim=1)
+        
+        # 4. MLP 融合
+        output = self.fusion_mlp(fusion_input)
+        
+        return output
         
     @property
     def output_dim(self):
@@ -87,9 +100,19 @@ class R_Actor(nn.Module):
         self._recurrent_N = args.recurrent_N
         self.tpdv = dict(dtype=torch.float32, device=device)
 
-        # obs_shape = get_shape_from_obs_space(obs_space)
-        # base = CNNBase if len(obs_shape) == 3 else MLPBase
-        # self.base = base(args, obs_shape)
+        obs_shape = get_shape_from_obs_space(obs_space)
+        if args.use_fusion_network: # 需要在 config.py 中添加此参数
+                    self.base = FusionCNN(
+                        obs_shape, 
+                        self.hidden_size, 
+                        self._use_orthogonal
+                    )
+        elif len(obs_shape) == 3:
+                    # 原有的 Image 处理逻辑
+                    self.base = CNNBase(args, obs_shape)
+        else:
+            # 原有的 Vector 处理逻辑
+            self.base = MLPBase(args, obs_shape)
 
         self.base = AdvancedCombinedExtractor(obs_space)
         input_dim = self.base.output_dim
@@ -187,12 +210,20 @@ class R_Critic(nn.Module):
         self.tpdv = dict(dtype=torch.float32, device=device)
         init_method = [nn.init.xavier_uniform_, nn.init.orthogonal_][self._use_orthogonal]
 
-        # cent_obs_shape = get_shape_from_obs_space(cent_obs_space)
-        # base = CNNBase if len(cent_obs_shape) == 3 else MLPBase
-        # self.base = base(args, cent_obs_shape)
+        cent_obs_shape = get_shape_from_obs_space(cent_obs_space)
 
-        self.base = AdvancedCombinedExtractor(cent_obs_space)
-        input_dim = self.base.output_dim
+        if args.use_fusion_network:
+                    # 实例化 FusionCNN 作为 Critic 的基础网络（Base）
+                    # 注意：这里的 share_obs_shape 维度必须与 FusionCNN 预期的输入一致
+                    self.base = FusionCNN(share_obs_shape, self.hidden_size, self._use_orthogonal)
+                # --- 修改结束 ---
+        elif len(share_obs_shape) == 3:
+            self.base = CNNBase(args, share_obs_shape)
+        else:
+            self.base = MLPBase(args, share_obs_shape)
+
+        # self.base = AdvancedCombinedExtractor(cent_obs_space)
+        # input_dim = self.base.output_dim
 
         if self._use_naive_recurrent_policy or self._use_recurrent_policy:
             self.rnn = RNNLayer(self.hidden_size, self.hidden_size, self._recurrent_N, self._use_orthogonal)

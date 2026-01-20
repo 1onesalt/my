@@ -24,7 +24,8 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import get_config
 from envs.env_wrappers import DummyVecEnv
-from MY_ENV.envs.target_search import target_search
+from MY_ENV.envs.target_search import TargetSearchEnv
+from MY_ENV.envs.my_wrappers import FlattenObservation
 
 """Train script for MPEs."""
 
@@ -39,11 +40,12 @@ def make_train_env(all_args):
         def init_env():
 
             if all_args.env_name == "MyEnv":
-                env = target_search(
+                env = TargetSearchEnv(
                     n_agent=all_args.num_agents,
                     max_steps=all_args.episode_length,
                     # 如果需要，这里可以传入更多参数，如 x_min, x_max 等
                 )
+                env = FlattenObservation(env)
             else:
                 print("Can not support the " + all_args.env_name + " environment.")
                 raise NotImplementedError
@@ -64,7 +66,7 @@ def make_eval_env(all_args):
         def init_env():
             if all_args.env_name == "MyEnv":
                 # [修改] 实例化评估环境
-                env = target_search(
+                env = TargetSearchEnv(
                     n_agent=all_args.num_agents,
                     max_steps=all_args.episode_length
                 )
