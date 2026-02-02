@@ -13,7 +13,7 @@ import setproctitle
 import numpy as np
 from pathlib import Path
 import torch
-
+from gym import spaces
 # Get the parent directory of the current file
 parent_dir = os.path.abspath(os.path.join(os.getcwd(), "."))
 # sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -171,6 +171,37 @@ def main(args):
     # env init
     envs = make_train_env(all_args)  #训练env
     eval_envs = make_eval_env(all_args) if all_args.use_eval else None   #评估env
+        
+    # 强制修正 share_observation_space
+    if all_args.use_centralized_V:
+        # 1. 获取真实的局部观测维度 (1027)
+        # 注意：envs.observation_space[0] 可能是 Box(1027,)
+        obs_dim = envs.observation_space[0].shape[0] 
+        
+        # 2. 获取智能体数量 (2)
+        # 注意：这里我们直接用 envs.n_agents 或 all_args.num_agents
+        num_agents = all_args.num_agents
+        
+        # 3. 计算正确的共享维度 (1027 * 2 = 2054)
+        correct_share_dim = obs_dim * num_agents
+        
+        print(f"[Forced Fix] Correcting share_obs_dim from Unknown to {correct_share_dim}")
+        
+        # 4. 创建新的 Space 对象
+        new_share_space = spaces.Box(
+            low=-np.inf, high=np.inf, 
+            shape=(correct_share_dim,), 
+            dtype=np.float32
+        )
+        
+        # 5. 暴力覆盖 envs 中的定义
+        # wrapper 通常是一个 list 结构，我们需要覆盖它
+        envs.share_observation_space = [new_share_space for _ in range(num_agents)]
+        
+        if eval_envs:
+            eval_envs.share_observation_space = [new_share_space for _ in range(num_agents)]
+
+
     num_agents = all_args.num_agents
 
     config = {

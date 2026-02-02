@@ -1,5 +1,5 @@
 import numpy as np
-from target_model2 import model, targets, target_CV, observe_Fov, polar2dicaer
+from MY_ENV.envs.target_model import model, targets, target_CV, observe_Fov, polar2dicaer
 from PHD import PHD
 from PHD import State_extraction, generate
 from OSPA import ospa
@@ -26,12 +26,12 @@ def main():
         np.zeros((4, 4)),       # 协方差
         0                       # 粒子数量
     ]
-
+               
     state2 = [
         0,                      # 权重
         np.zeros((1, 4)),       # 均值
         np.zeros((4, 4)),       # 协方差
-        0                       # 粒子数量
+        0                       # 粒子数量 
     ]
 
     ospa1 = np.full(num_steps, np.nan)

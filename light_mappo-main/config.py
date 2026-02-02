@@ -225,6 +225,23 @@ def get_config():
         help="Whether to use global state or concatenated obs",
     )
 
+# ... 在 parser.add_argument("--env_name"...) 附近添加
+    
+    # parser.add_argument(
+    #     "--num_agents", 
+    #     type=int, 
+    #     default=3, 
+    #     help="number of agents")
+    
+    # [新增] 是否使用融合网络 (FusionCNN)
+    parser.add_argument(
+        "--use_fusion_network",
+        action="store_true",
+        default=True,
+        help="Whether to use FusionCNN for grid + vector observation",
+    )
+    
+    # ...
     # replay buffer parameters
     parser.add_argument("--episode_length", type=int, default=200, help="Max length for any episode")
 
@@ -492,6 +509,12 @@ def get_config():
         type=str,
         default=None,
         help="by default None. set the path to pretrained model.",
-    )
+    )   
+
+    # parser.add_argument(
+    #     "--use_fusion_network",
+    #     action='store_true', 
+    #     default=False, 
+    #     help="Whether to use the custom Fusion CNN+MLP architecture for Target Search.")
 
     return parser

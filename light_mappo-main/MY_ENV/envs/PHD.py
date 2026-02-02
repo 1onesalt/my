@@ -322,8 +322,9 @@ class PHD():
             used = [False] * len(W_select)
             X_now = []
 
+            W_phd, M_phd, P_phd = [], [], []
+
             while not all(used):
-                W_phd, M_phd, P_phd = [], [], []
 
                 unused_indices = []
                 for i in range(len(used)):

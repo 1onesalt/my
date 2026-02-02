@@ -55,6 +55,12 @@ class SharedReplayBuffer(object):
                     (self.episode_length + 1, self.n_rollout_threads, num_agents, *v),
                     dtype=np.float32
                 )
+        else:
+            # 恢复被注释掉的数组初始化
+            self.share_obs = np.zeros(
+                (self.episode_length + 1, self.n_rollout_threads, num_agents, *share_obs_shape),
+                dtype=np.float32
+            )
 
         if isinstance(obs_shape, dict):
             self.obs = {}
@@ -63,6 +69,12 @@ class SharedReplayBuffer(object):
                     (self.episode_length + 1, self.n_rollout_threads, num_agents, *v),
                     dtype=np.float32
                 )
+        else:
+            # 恢复被注释掉的数组初始化
+            self.obs = np.zeros(
+            (self.episode_length + 1, self.n_rollout_threads, num_agents, *obs_shape),
+                dtype=np.float32
+            )        
 
 
         self.rnn_states = np.zeros(
@@ -115,13 +127,19 @@ class SharedReplayBuffer(object):
         self.share_obs[self.step + 1] = share_obs.copy()
         #self.obs[self.step + 1] = obs.copy()
 
+        # --- [修复 3] 插入 share_obs (兼容字典和数组) ---
+        if isinstance(self.share_obs, dict):
+            for key in self.share_obs:
+                self.share_obs[key][self.step + 1] = share_obs[key].copy()
+        else:
+            self.share_obs[self.step + 1] = share_obs.copy()
 
-        for key in obs:
-            # 确保键存在（与初始化时的键对应）
-            if key not in self.obs:
-                raise KeyError(f"Observation key {key} not in self.obs")
-            # 写入对应键的数组（时间步维度是第0维）
-            self.obs[key][self.step + 1] = obs[key].copy()
+        # --- [修复 4] 插入 obs (兼容字典和数组) ---
+        if isinstance(self.obs, dict):
+            for key in self.obs:
+                self.obs[key][self.step + 1] = obs[key].copy()
+        else:
+            self.obs[self.step + 1] = obs.copy()
         
 
         self.rnn_states[self.step + 1] = rnn_states_actor.copy()
@@ -185,13 +203,26 @@ class SharedReplayBuffer(object):
 
     def after_update(self):
         """Copy last timestep data to first index. Called after update to model."""
-        self.share_obs[0] = self.share_obs[-1].copy()
-        #self.obs[0] = self.obs[-1].copy()
+        # self.share_obs[0] = self.share_obs[-1].copy()
+        # #self.obs[0] = self.obs[-1].copy()
 
 
-        for key in self.obs:
-            # 对于每个观测项，取最后一个时间步（第0维是时间步）复制到第0个时间步
-            self.obs[key][0] = self.obs[key][-1].copy()
+        # for key in self.obs:
+        #     # 对于每个观测项，取最后一个时间步（第0维是时间步）复制到第0个时间步
+        #     self.obs[key][0] = self.obs[key][-1].copy()
+        
+        # --- [修复 5] 复制首尾数据 (兼容字典和数组) ---
+        if isinstance(self.share_obs, dict):
+            for key in self.share_obs:
+                self.share_obs[key][0] = self.share_obs[key][-1].copy()
+        else:
+            self.share_obs[0] = self.share_obs[-1].copy()
+
+        if isinstance(self.obs, dict):
+            for key in self.obs:
+                self.obs[key][0] = self.obs[key][-1].copy()
+        else:
+            self.obs[0] = self.obs[-1].copy()
 
         
         self.rnn_states[0] = self.rnn_states[-1].copy()
@@ -290,15 +321,22 @@ class SharedReplayBuffer(object):
         rand = torch.randperm(batch_size).numpy()
         sampler = [rand[i * mini_batch_size:(i + 1) * mini_batch_size] for i in range(num_mini_batch)]
 
-        share_obs = self.share_obs[:-1].reshape(-1, *self.share_obs.shape[3:])
-        #obs = self.obs[:-1].reshape(-1, *self.obs.shape[3:])
+        # --- [修复 6] 处理 Generator 中的数据变形 (兼容字典和数组) ---
+        if isinstance(self.share_obs, dict):
+            share_obs = {
+                key: self.share_obs[key][:-1].reshape(-1, *self.share_obs[key].shape[3:])
+                for key in self.share_obs
+            }
+        else:
+            share_obs = self.share_obs[:-1].reshape(-1, *self.share_obs.shape[3:])
 
-
-        # 2. 截取除最后一个时间步外的所有数据，并重塑形状（保持字典结构）
-        obs = {
-            key: self.obs[key][:-1].reshape(-1, *self.obs[key].shape[3:])
-            for key in self.obs
-        }
+        if isinstance(self.obs, dict):
+            obs = {
+                key: self.obs[key][:-1].reshape(-1, *self.obs[key].shape[3:])
+                for key in self.obs
+            }
+        else:
+            obs = self.obs[:-1].reshape(-1, *self.obs.shape[3:])
 
 
         rnn_states = self.rnn_states[:-1].reshape(-1, *self.rnn_states.shape[3:])
@@ -314,16 +352,16 @@ class SharedReplayBuffer(object):
         advantages = advantages.reshape(-1, 1)
 
         for indices in sampler:
-            # obs size [T+1 N M Dim]-->[T N M Dim]-->[T*N*M,Dim]-->[index,Dim]
-            share_obs_batch = share_obs[indices]
-            #obs_batch = obs[indices]
+            # 采样
+            if isinstance(share_obs, dict):
+                share_obs_batch = {key: share_obs[key][indices] for key in share_obs}
+            else:
+                share_obs_batch = share_obs[indices]
 
-
-            # 3. 根据indices采样观测数据（按键分别采样，仍返回字典）
-            obs_batch = {
-                key: obs[key][indices]
-                for key in obs
-            }
+            if isinstance(obs, dict):
+                obs_batch = {key: obs[key][indices] for key in obs}
+            else:
+                obs_batch = obs[indices]
 
 
             rnn_states_batch = rnn_states[indices]

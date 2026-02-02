@@ -1,7 +1,7 @@
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
-def ospa(X, Y, c=120, p=2):
+def ospa(X, Y, c=120, p=1):
     n, m = len(X), len(Y)
     if n == 0 and m == 0:
         return 0.0

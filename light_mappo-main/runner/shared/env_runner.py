@@ -59,6 +59,17 @@ class EnvRunner(Runner):  #继承Runner
                 # Obser reward and next obs
                 obs, rewards, dones, infos = self.envs.step(actions_env)
 
+                # [关键逻辑] 从 infos 提取全局融合图作为 share_obs
+                share_obs_list = []
+                for i in range(self.n_rollout_threads):
+                    thread_infos = infos[i] # 可能是 tuple 或 list
+                    thread_share = []
+                    for agent_info in thread_infos:
+                        thread_share.append(agent_info['share_obs'])
+                    share_obs_list.append(thread_share)
+                
+                share_obs = np.array(share_obs_list)
+
                 data = (
                     obs,
                     rewards,
@@ -124,71 +135,79 @@ class EnvRunner(Runner):  #继承Runner
         # reset env
         obs = self.envs.reset()  
        
-        # # replay buffer
-        # if self.use_centralized_V:  
-        #     share_obs = obs.reshape(self.n_rollout_threads, -1)  
-        #     share_obs = np.expand_dims(share_obs, 1).repeat(     
-        #         self.num_agents, axis=1
-        #     )  
+        # # 构造 Share Obs (Critic 输入)
+        # if self.use_centralized_V:
+        #     # 简单策略：将所有智能体的局部观测拼接作为全局观测
+        #     # 变形为 [n_threads, n_agents * obs_dim]
+        #     share_obs = obs.reshape(self.n_rollout_threads, -1)
+        #     # 扩展维度以适配 Buffer [n_threads, n_agents, global_dim]
+        #     share_obs = np.expand_dims(share_obs, 1).repeat(self.num_agents, axis=1)
         # else:
         #     share_obs = obs
- 
+
+        # 构建初始 Share Obs (t=0时刻融合图为空，用Local Obs代替)
+        if self.use_centralized_V:
+            if isinstance(obs, dict):
+                grid = obs['polar_grid']
+                state = obs['self_state']
+                batch, agents = grid.shape[0], grid.shape[1]
+                grid_flat = grid.reshape(batch, agents, -1)
+                share_obs = np.concatenate([grid_flat, state], axis=-1)
+            else:
+                share_obs = obs.copy()
+        else:
+            share_obs = obs
+        
+        if isinstance(self.buffer.share_obs, dict):
+             for key in self.buffer.share_obs:
+                self.buffer.share_obs[key][0] = share_obs[key].copy()
+        else:
+            self.buffer.share_obs[0] = share_obs.copy()
+
+        if isinstance(self.buffer.obs, dict):
+             for key in self.buffer.obs:
+                self.buffer.obs[key][0] = obs[key].copy()
+        else:
+            self.buffer.obs[0] = obs.copy()
+
+
         # #初始化缓冲区
         # self.buffer.share_obs[0] = share_obs.copy()
         # self.buffer.obs[0] = obs.copy()
-   
-        # 1. 遍历每个环境
-        share_obs = []
-        for env_obs in obs:
-            # env_obs是单个环境的观测数组：array([agent0_dict, agent1_dict, ...], dtype=object)
-            n_agents = len(env_obs)  # 该环境中的智能体数量
-            env_share_obs = []  # 存储当前环境中所有智能体的共享观测
-            
-            # 2. 收集当前环境中所有智能体的观测数据（按类型汇总）
-            all_targets = []    # 所有智能体的target观测
-            all_utilities = []  # 所有智能体的utility观测
-            all_self_pos = []   # 所有智能体的自身位置
-            for agent_dict in env_obs:
-                all_targets.append(agent_dict['target'])
-                all_utilities.append(agent_dict['utility'])
-                all_self_pos.append(agent_dict['self_pos'])
-            
-            # 3. 为每个智能体生成共享观测（包含所有智能体的信息）
-            for i in range(n_agents):
-                # 共享观测 = 所有智能体的target + 所有智能体的utility + 所有智能体的self_pos
-                # 这里将各部分数据拼接（具体拼接方式可根据模型需求调整）
-                share_target = np.concatenate(all_targets, axis=0)  # 拼接所有target（假设维度兼容）
-                share_utility = np.concatenate(all_utilities, axis=0)  # 拼接所有utility
-                share_self_pos = np.concatenate(all_self_pos, axis=0)  # 拼接所有self_pos
-                
-                # 合并为单个共享观测数组（可根据需求展平或保持多维）
-                agent_share_obs = np.concatenate([
-                    share_target,  # 展平为一维（或保留多维，视模型输入而定）
-                    share_utility,
-                    share_self_pos.flatten()
-                ])
-                
-                env_share_obs.append(agent_share_obs)
-            
-            # 4. 将当前环境的共享观测转换为numpy数组（保持与原始obs一致的容器类型）
-            env_share_obs_array = np.array(env_share_obs, dtype=object)
-            share_obs.append(env_share_obs_array)
-        #初始化缓冲区
-        self.buffer.share_obs[0] = share_obs.copy()
-        self.buffer.obs[0] = obs.copy()
 
 
     @torch.no_grad()
     def collect(self, step):   #
         self.trainer.prep_rollout()
 
-        obs_input = {}
-        for key, data in self.buffer.obs.items():
-            obs_input[key] = np.concatenate(data[step]) # 结果 shape: [n_rollout * n_agents, ...]
+        # obs_input = {}
+        # for key, data in self.buffer.obs.items():
+        #     obs_input[key] = np.concatenate(data[step]) # 结果 shape: [n_rollout * n_agents, ...]
 
-        share_obs_input = {}
-        for key, data in self.buffer.share_obs.items():
-            share_obs_input[key] = np.concatenate(data[step])
+        # share_obs_input = {}
+        # for key, data in self.buffer.share_obs.items():
+        #     share_obs_input[key] = np.concatenate(data[step])
+
+        # share_obs = np.concatenate(self.buffer.share_obs[step])
+        # obs = np.concatenate(self.buffer.obs[step])
+
+        # Share Obs (From buffer)
+        if isinstance(self.buffer.share_obs, dict):
+            share_obs = {
+                key: np.concatenate(self.buffer.share_obs[key][step]) 
+                for key in self.buffer.share_obs
+            }
+        else:
+            share_obs = np.concatenate(self.buffer.share_obs[step])
+        
+        # Local Obs
+        if isinstance(self.buffer.obs, dict):
+            obs = {
+                key: np.concatenate(self.buffer.obs[key][step]) 
+                for key in self.buffer.obs
+            }
+        else:
+            obs = np.concatenate(self.buffer.obs[step])
 
         rnn_states_input = np.concatenate(self.buffer.rnn_states[step])
         rnn_states_critic_input = np.concatenate(self.buffer.rnn_states_critic[step])
@@ -201,8 +220,8 @@ class EnvRunner(Runner):  #继承Runner
             rnn_states,
             rnn_states_critic,
         ) = self.trainer.policy.get_actions(
-            share_obs_input,    # 修改点：传入字典
-            obs_input,          # 修改点：传入字典
+            share_obs,    # 修改点：传入字典
+            obs,          # 修改点：传入字典
             rnn_states_input,
             rnn_states_critic_input,
             masks_input,

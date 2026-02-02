@@ -1,32 +1,43 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from .util import init, get_clones
+from .util import init
 
 class FusionCNN(nn.Module):
     """
-    对应论文 4.4.1 节：特征提取模块与特征融合模块
-    输入: Flattened observation [Grid (U*V*C) | Self_State (3)]
-    输出: Hidden Feature Vector
+    智能融合网络：支持单路 CNN (Actor) 和 双路 CNN (Critic)
     """
     def __init__(self, obs_shape, hidden_size=64, use_orthogonal=True, activation_id=1, kernel_size=3, stride=1):
         super(FusionCNN, self).__init__()
         
-        # --- 1. 参数解析与拆分维度 ---
-        # 假设 obs_shape 是一个元组，例如 (1027,)
         self.total_dim = obs_shape[0]
         
-        # 硬编码来自环境的维度 (需与环境保持一致)
-        self.c, self.h, self.w = 4, 16, 16 # Channel=4, H=16, W=16
-        self.grid_flat_dim = self.c * self.h * self.w # 1024
-        self.state_dim = 3 
+        # 硬编码维度
+        self.c, self.h, self.w = 4, 16, 16
+        self.single_grid_dim = self.c * self.h * self.w # 1024
+        self.single_state_dim = 3
+        self.single_obs_dim = self.single_grid_dim + self.single_state_dim # 1027
         
-        # 验证维度匹配
-        assert self.total_dim == self.grid_flat_dim + self.state_dim, \
-            f"Input dim {self.total_dim} does not match Grid({self.grid_flat_dim}) + State({self.state_dim})"
+        # === 智能判断模式 ===
+        if self.total_dim <= 1100:
+            # 模式 A: Actor (局部观测, ~1027维)
+            self.mode = "single"
+            self.vector_dim = self.total_dim - self.single_grid_dim
+            cnn_output_dim = 512 # 32*4*4
+        else:
+            # 模式 B: Critic (全局观测, ~2054维)
+            # 假设全局观测是两个局部观测的拼接
+            self.mode = "dual"
+            self.num_agents = self.total_dim // self.single_obs_dim # 应该是 2
+            
+            # 除去所有 Grid 剩下的向量维度
+            self.vector_dim = self.total_dim - (self.single_grid_dim * self.num_agents)
+            
+            # 双路 CNN，输出维度翻倍
+            cnn_output_dim = 512 * self.num_agents 
+            
+            print(f"[FusionCNN] Initialized in DUAL mode. Input: {self.total_dim}, Agents: {self.num_agents}")
 
-        # --- 2. CNN 前端 (特征提取模块) ---
-        # "CNN 前端由三层卷积层构成"
+        # --- CNN 骨干网络 ---
         active_func = [nn.Tanh(), nn.ReLU(), nn.LeakyReLU(), nn.ELU()][activation_id]
         init_method = [nn.init.xavier_uniform_, nn.init.orthogonal_][use_orthogonal]
         gain = nn.init.calculate_gain(['tanh', 'relu', 'leaky_relu', 'leaky_relu'][activation_id])
@@ -34,52 +45,74 @@ class FusionCNN(nn.Module):
         def init_(m):
             return init(m, init_method, lambda x: nn.init.constant_(x, 0), gain=gain)
 
+        # 共享权重的 CNN 特征提取器
         self.cnn = nn.Sequential(
-            init_(nn.Conv2d(in_channels=self.c, out_channels=16, kernel_size=3, stride=1, padding=1)),
+            init_(nn.Conv2d(self.c, 16, kernel_size=3, stride=1, padding=1)),
             active_func,
-            # Layer 2
-            init_(nn.Conv2d(in_channels=16, out_channels=32, kernel_size=3, stride=2, padding=1)), # Downsample 16->8
+            init_(nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1)), # 16->8
             active_func,
-            # Layer 3
-            init_(nn.Conv2d(in_channels=32, out_channels=32, kernel_size=3, stride=2, padding=1)), # Downsample 8->4
+            init_(nn.Conv2d(32, 32, kernel_size=3, stride=2, padding=1)), # 8->4
             active_func,
             nn.Flatten(),
         )
-        
-        # 计算 CNN 输出维度: 32 channels * 4 * 4 = 512
-        self.cnn_out_dim = 32 * 4 * 4
 
-        # --- 3. 特征融合模块 (MLP) ---
-        # "CNN提取的空间特征在展平后，与归一化处理后的自身状态向量Os进行拼接，并输入至全连接层"
-        self.fusion_input_dim = self.cnn_out_dim + self.state_dim
+        # --- 融合 MLP ---
+        self.fusion_input_dim = cnn_output_dim + self.vector_dim
         
         self.fusion_mlp = nn.Sequential(
             init_(nn.Linear(self.fusion_input_dim, hidden_size)),
             active_func,
-            init_(nn.LayerNorm(hidden_size))
+            nn.LayerNorm(hidden_size)
         )
 
     def forward(self, obs):
-        # obs shape: (batch_size, 1027)
+        if self.mode == "single":
+            return self._forward_single(obs)
+        else:
+            return self._forward_dual(obs)
+
+    def _forward_single(self, obs):
+        # 提取 Grid (前1024)
+        grid = obs[:, :self.single_grid_dim]
+        # 提取 Vector (后3)
+        vector = obs[:, self.single_grid_dim:]
         
-        # 1. 数据切片 (Slicing)
-        # Grid 部分: 前 1024 维
-        grid_flat = obs[:, :self.grid_flat_dim] 
-        # State 部分: 后 3 维
-        state_vec = obs[:, self.grid_flat_dim:] 
+        # CNN 处理
+        x_grid = grid.view(-1, self.c, self.h, self.w)
+        cnn_feat = self.cnn(x_grid)
         
-        # 2. 维度重塑 (Reshape for CNN)
-        # (Batch, 1024) -> (Batch, 4, 16, 16)
-        # 注意: PyTorch Conv2d 需要 (N, C, H, W)
-        x_grid = grid_flat.view(-1, self.c, self.h, self.w)
+        # 融合
+        concat = torch.cat([cnn_feat, vector], dim=1)
+        return self.fusion_mlp(concat)
+
+    def _forward_dual(self, obs):
+        # 全局观测结构: [Grid1, State1, Grid2, State2]
+        # 我们需要将其拆解
         
-        # 3. CNN 前向传播
-        x_cnn_feat = self.cnn(x_grid) # Output: (Batch, 512)
+        cnn_feats = []
+        vectors = []
         
-        # 4. 特征拼接 (Concatenation)
-        concat_feat = torch.cat([x_cnn_feat, state_vec], dim=1) # (Batch, 515)
+        # 逐个智能体切片
+        for i in range(self.num_agents):
+            start = i * self.single_obs_dim
+            end = (i + 1) * self.single_obs_dim
+            agent_obs = obs[:, start:end]
+            
+            # 拆分 Grid 和 Vector
+            grid = agent_obs[:, :self.single_grid_dim]
+            vec = agent_obs[:, self.single_grid_dim:]
+            
+            # CNN 提取特征
+            x_grid = grid.view(-1, self.c, self.h, self.w)
+            cnn_out = self.cnn(x_grid)
+            
+            cnn_feats.append(cnn_out)
+            vectors.append(vec)
+            
+        # 拼接所有特征: [CNN1, CNN2, Vec1, Vec2]
+        # 这样保留了所有空间信息
+        all_cnn = torch.cat(cnn_feats, dim=1)
+        all_vec = torch.cat(vectors, dim=1)
         
-        # 5. 融合 MLP
-        output = self.fusion_mlp(concat_feat) # (Batch, hidden_size)
-        
-        return output
+        concat = torch.cat([all_cnn, all_vec], dim=1)
+        return self.fusion_mlp(concat)

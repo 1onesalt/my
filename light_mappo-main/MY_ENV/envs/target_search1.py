@@ -10,11 +10,10 @@ from MY_ENV.utils.observation_space import MultiAgentObservationSpace
 from MY_ENV.envs.target_model import model, targets, target_CV, observe_Fov, polar2dicaer
 from MY_ENV.envs.PHD import PHD, State_extraction, generate
 from MY_ENV.envs.phd_fusion import AGMFusionCenter
-from MY_ENV.envs.OSPA import ospa
 
 class SensorAgent:
     """
-    封装单个传感器的:位置、PHD滤波器、历史状态
+    封装单个传感器的：位置、PHD滤波器、历史状态
     """
     def __init__(self, agent_id, x, y, heading, track_params):
         self.id = agent_id
@@ -191,17 +190,13 @@ class TargetSearchEnv(gym.Env):
         self.sensor_pos = self.sensor_states[:, 0:2]
 
         self.tracking_agents = []   #agent实例列表
-        self.state = []
         
         for i in range(self.n_agents):
             init_x, init_y, init_heading = self.sensor_states[i]
             agent = SensorAgent(i, init_x, init_y, init_heading, self.base_model_params)  #封装单个传感器的：位置、PHD滤波器、历史状态
             self.tracking_agents.append(agent)
-            self.state.append(agent.state)
             
         self.fusion_center = AGMFusionCenter(self.base_model_params)
-
-        self.global_phd_state = [[], [], [], 0]
 
         # 生成初始观测
         return self._get_observations()
@@ -238,80 +233,61 @@ class TargetSearchEnv(gym.Env):
             self.agent_pos[i][1] = np.clip(self.agent_pos[i][1] + dy, self.y_min, self.y_max)
 
         # 2. 获取新的观测并更新 PHD
-        local_estimates_list = []
+        current_phd_states = []
         sensor_configs = []
 
-        for i, agent in enumerate(self.tracking_agents):
-            curr_x = self.agent_pos[i][0]
-            curr_y = self.agent_pos[i][1]
-            curr_heading = self.agent_headings[i]
-
-            # (A) 同步状态
-            agent.update_state(curr_x, curr_y, curr_heading)
-            
-            # (B) 记录配置
+        for i in range(self.n_agents):
             sensor_configs.append({
-                'x': curr_x, 'y': curr_y, 'range': self.sensor_r
+                'x': self.agent_pos[i][0],
+                'y': self.agent_pos[i][1],
+                'range': self.sensor_r,
             })
+
+            # 获取观测
+            model_data = self.base_model_params.copy()
+            # 修正: model 中需要动态更新 agent 位置
+            model_data['x_agent'] = self.agent_pos[i][0]
+            model_data['y_agent'] = self.agent_pos[i][1]
             
-            # (C) 生成模拟量测 (圆形探测区域 + 相对角度)
-            z_polar_relative = self._generate_noisy_measurement(i, curr_x, curr_y, curr_heading)
+            z_polar = observe_Fov(model_data, self.trajectories[self.step_count])
+            Z_dicaer = polar2dicaer(z_polar, model_data)
             
-            # (D) 局部滤波
-            X_local = agent.process_measurement(z_polar_relative)
-            local_estimates_list.append(X_local)
+            # 更新观测历史
+            self.agent_Z_dicaer[i][0] = self.agent_Z_dicaer[i][1]
+            self.agent_Z_dicaer[i][1] = Z_dicaer
+            
+            # PHD 更新
+            phd = PHD(model_data)
+            phd.init_params(self.agent_Z_dicaer[i][0], self.agent_Z_dicaer[i][1], z_polar, self.state[i])
+            # 注意: generate 函数需要正确实现新生目标逻辑
+            phd.w_new, phd.m_new, phd.P_new, phd.J_new = generate(
+                phd.z_lastD, phd.nums_z_lastD, phd.z_nowD, phd.nums_z_nowD, phd.Vx_thre, phd.Vy_thre
+            )
+            X_now = phd.predict_update()
+            current_phd_states.append(X_now)
         
-        global_state = self.fusion_center.run(local_estimates_list, sensor_configs)
+        self.global_phd_state = self.fusion_module.run(current_phd_states, sensor_configs)
 
-        feedback_list = self.fusion_center.distribute_to_sensors(global_state, sensor_configs)
+        feedback_states = self.fusion_module.distribute_to_sensors(self.global_phd_state, sensor_configs)
 
-        for i, agent in enumerate(self.tracking_agents):
-            fb = feedback_list[i]
-            # [w, m, P, n]
-            agent.state = [fb[0], fb[1], fb[2], len(fb[0])]
+        for i in range(self.n_agents):
+            self.state[i] = feedback_states[i]
 
-        # =======================================================
-        # 3. 奖励计算 (Reward) - 基于 OSPA
-        # =======================================================
-        # 提取全局估计位置 (权重 > 0.5)
-        est_w, est_m = global_state[0], global_state[1]
-        est_pos = []
-        for idx, w in enumerate(est_w):
-            if w > 0.5:
-                est_pos.append(est_m[idx][[0, 2]]) # 取 [x, y]
-
-        # 获取当前真值位置 (注意 step_count 索引)
-        # trajectories 索引从 0 开始 (对应 t=1)
-        current_step_idx = self.step_count - 1
-        if current_step_idx < len(self.trajectories):
-            current_gt = [t[[0, 2]] for t in self.trajectories[current_step_idx]]
-        else:
-            current_gt = []
-
-        # 计算 OSPA
-        ospa_score = self._calculate_ospa(est_pos, current_gt, c=200, p=2)
-        
-        # 构造奖励 (OSPA 越小越好)
-        # 基础奖励: -OSPA/200 (范围 -1 ~ 0)
-        step_reward = -1.0 * (ospa_score / 200.0)
-        # 额外奖励: 找到目标
-        if ospa_score < 50:
-            step_reward += 0.5
-
-        # =======================================================
-        # 4. 输出打包
-        # =======================================================
+        # 3. 构建观测张量和计算奖励
         obs_n, share_obs_n = self._get_observations_dual()
         episode_done = (self.step_count >= self.max_steps)
 
         for i in range(self.n_agents):
-            rewards.append([step_reward]) # 共享奖励 (或者你可以设计个体奖励)
-            self.total_reward[i] += step_reward
+            reward_val = self._compute_reward(i, self.state[i])
+            rewards.append([reward_val])
+            self.total_reward[i] += reward_val
             dones.append(episode_done)
             infos.append({
-                'ospa': ospa_score
+                'step': self.step_count,
+                'share_obs': share_obs_n[i]
             })
 
+        self.done = all(dones)
         return obs_n, rewards, dones, infos
 
     def _get_observations_dual(self):
@@ -633,49 +609,3 @@ class TargetSearchEnv(gym.Env):
             ])
             
         return global_grid, np.array(joint_state, dtype=np.float32)
-    
-
-    def _generate_noisy_measurement(self, agent_idx, s_x, s_y, s_heading):
-        """生成带噪声的相对量测 (圆形视域)"""
-        z_list = []
-        
-        current_step_idx = self.step_count - 1
-        if current_step_idx >= len(self.trajectories): return []
-        current_targets = self.trajectories[current_step_idx]
-        
-        for target in current_targets:
-            t_x, t_y = target[0], target[2]
-            
-            dx = t_x - s_x
-            dy = t_y - s_y
-            true_dist = np.sqrt(dx**2 + dy**2)
-            
-            # 视域判定: 仅基于距离 (圆形)
-            if true_dist <= self.sensor_r:
-                
-                # 计算相对角度
-                true_global_theta = np.arctan2(dy, dx)
-                rel_theta = true_global_theta - s_heading
-                rel_theta = (rel_theta + np.pi) % (2 * np.pi) - np.pi
-                
-                # 漏检与噪声
-                if np.random.rand() < self.track_params["Pd"]:
-                    std_r = np.sqrt(self.track_params["obverser_R"][0,0])
-                    std_theta = np.sqrt(self.track_params["obverser_R"][1,1])
-                    
-                    meas_r = true_dist + np.random.randn() * std_r
-                    meas_theta = rel_theta + np.random.randn() * std_theta
-                    meas_theta = (meas_theta + np.pi) % (2 * np.pi) - np.pi # 归一化
-                    
-                    z_list.append(np.array([meas_r, meas_theta]))
-        
-        # 杂波 (Poisson)
-        n_clutter = np.random.poisson(self.track_params["Zr"])
-        for _ in range(n_clutter):
-            c_r = np.random.uniform(0, self.sensor_r)
-            c_theta = np.random.uniform(-np.pi, np.pi)
-            z_list.append(np.array([c_r, c_theta]))
-            
-        return z_list
-
-
