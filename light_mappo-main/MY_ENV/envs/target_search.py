@@ -18,12 +18,16 @@ class SensorAgent:
     """
     def __init__(self, agent_id, x, y, heading, track_params):
         self.id = agent_id
+        self.heading = heading
         
         # 1. 独立的模型参数 (深拷贝)
         self.model_data = copy.deepcopy(track_params)
         self.model_data['x_agent'] = x
         self.model_data['y_agent'] = y
         self.model_data['heading_agent'] = heading
+        # 与 PHD.generate() 所需字段保持兼容，缺省时给出保守默认值
+        self.model_data.setdefault('Vx_thre', 8.0)
+        self.model_data.setdefault('Vy_thre', 8.0)
         
         # 2. 独立的 PHD 滤波器实例
         self.phd = PHD(self.model_data)
@@ -47,7 +51,7 @@ class SensorAgent:
         Input: z_polar_noisy (当前时刻的极坐标量测，由环境生成)
         Output: X_local (局部估计)
         """
-        z_polar_global = []
+        z_polar_global_deg = []
         
         # 1. 坐标系对齐 (相对 -> 全局)
         for z in z_polar_noisy:
@@ -58,11 +62,12 @@ class SensorAgent:
             theta_global = theta_rel + self.heading
             # 归一化到 [-pi, pi]
             theta_global = (theta_global + np.pi) % (2 * np.pi) - np.pi
-            z_polar_global.append(np.array([r, theta_global]))
+            theta_global_deg = np.degrees(theta_global) % 360.0
+            z_polar_global_deg.append(np.array([r, theta_global_deg]))
 
         # 1. 极坐标转直角坐标 (用于新生检测)
-        if len(z_polar_global) > 0:
-            z_cart = polar2dicaer(z_polar_global, self.model_data)
+        if len(z_polar_global_deg) > 0:
+            z_cart = polar2dicaer(z_polar_global_deg, self.model_data)
         else:
             z_cart = []
             
@@ -73,7 +78,8 @@ class SensorAgent:
             
         # 3. 如果历史数据不足，直接返回空或上一时刻状态
         if len(self.z_cart_history) < 2:
-            return self.phd.predict_update() # 或者 return self.state
+            # PHD 在未完成 init_params / generate 前无法直接 predict_update
+            return self.state
 
         # 4. 准备 PHD 输入数据
         z_lastD = self.z_cart_history[-2] # 上一帧直角
@@ -81,7 +87,7 @@ class SensorAgent:
         
         # 5. PHD 流程
         # 初始化 (使用上一时刻融合反馈回来的 self.state)
-        self.phd.init_params(z_lastD, z_nowD, z_polar_noisy, self.state)
+        self.phd.init_params(z_lastD, z_nowD, z_polar_global_deg, self.state)
         
         # 新生检测
         w_new, m_new, P_new, J_new = generate(
@@ -111,8 +117,8 @@ class TargetSearchEnv(gym.Env):
         self.sensor_r = self.base_model_params["obverser_d"]  # 视域半径 d
         self.agent_v = 10.0  # 智能体恒定速率 v (假设值，需根据实际情况调整)
 
-        # 初始化融合中心
-        self.fusion_module = AGMFusionCenter(self.base_model_params)
+        # 初始化融合中心（统一使用 fusion_center 命名）
+        self.fusion_center = AGMFusionCenter(self.base_model_params)
         self.tracking_agents = []
         
         # --- 2. 极坐标网格参数 (Section 4.1) ---
@@ -185,26 +191,37 @@ class TargetSearchEnv(gym.Env):
         self.done = False
         self.total_reward = [0.0 for _ in range(self.n_agents)]
         
+        # 1. 初始化目标和传感器物理状态
+        self.trajectories = self._init_targets()
+        self.targets = self.trajectories
+        self.sensor_states = self._init_sensors()                  
         
-        self.targets = self._init_targets()                        # 初始化目标轨迹
-        self.sensor_states = self._init_sensors()                  # 初始化传感器位置和朝向
-        self.sensor_pos = self.sensor_states[:, 0:2]
+        self.agent_pos = self.sensor_states[:, 0:2].copy()  # [N, 2]
+        self.agent_headings = self.sensor_states[:, 2].copy() # [N]
 
-        self.tracking_agents = []   #agent实例列表
-        self.state = []
+        self.tracking_agents = []   
+        self.state = [] 
         
+        # 2. 实例化智能体并填充状态容器
         for i in range(self.n_agents):
             init_x, init_y, init_heading = self.sensor_states[i]
-            agent = SensorAgent(i, init_x, init_y, init_heading, self.base_model_params)  #封装单个传感器的：位置、PHD滤波器、历史状态
+            # 创建智能体实例
+            agent = SensorAgent(i, init_x, init_y, init_heading, self.base_model_params)  
             self.tracking_agents.append(agent)
-            self.state.append(agent.state)
+            self.state.append(agent.state) 
             
         self.fusion_center = AGMFusionCenter(self.base_model_params)
-
         self.global_phd_state = [[], [], [], 0]
 
-        # 生成初始观测
+        # 3. 最后生成观测（此时 self.state, self.agent_pos 等均已就绪）
         return self._get_observations()
+
+    def seed(self, seed=None):
+        if seed is None:
+            seed = np.random.randint(0, 2**31 - 1)
+        np.random.seed(seed)
+        random.seed(seed)
+        return [seed]
 
     def step(self, actions):
         self.step_count += 1
@@ -216,14 +233,14 @@ class TargetSearchEnv(gym.Env):
         # 1. 智能体运动更新 (Section 2-4)
         for i in range(self.n_agents):
             # --- 动作解析 ---
-            action_in = actions[i]    
-        if hasattr(action_in, 'shape') and len(action_in.shape) > 0 and action_in.size > 1:
-            # 如果是 One-hot 向量 (例如 [0, 0, 1, 0...])
-            action_idx = np.argmax(action_in)
-        elif hasattr(action_in, 'item'):
-            action_idx = int(action_in.item())
-        else:
-            action_idx = int(action_in)
+            action_in = actions[i]
+            if hasattr(action_in, 'shape') and len(action_in.shape) > 0 and action_in.size > 1:
+                # 如果是 One-hot 向量 (例如 [0, 0, 1, 0...])
+                action_idx = int(np.argmax(action_in))
+            elif hasattr(action_in, 'item'):
+                action_idx = int(action_in.item())
+            else:
+                action_idx = int(action_in)
 
             # --- 运动更新 ---
             # 更新朝向
@@ -247,7 +264,7 @@ class TargetSearchEnv(gym.Env):
             curr_heading = self.agent_headings[i]
 
             # (A) 同步状态
-            agent.update_state(curr_x, curr_y, curr_heading)
+            agent.update_position(curr_x, curr_y, curr_heading)
             
             # (B) 记录配置
             sensor_configs.append({
@@ -262,6 +279,7 @@ class TargetSearchEnv(gym.Env):
             local_estimates_list.append(X_local)
         
         global_state = self.fusion_center.run(local_estimates_list, sensor_configs)
+        self.global_phd_state = global_state
 
         feedback_list = self.fusion_center.distribute_to_sensors(global_state, sensor_configs)
 
@@ -269,34 +287,17 @@ class TargetSearchEnv(gym.Env):
             fb = feedback_list[i]
             # [w, m, P, n]
             agent.state = [fb[0], fb[1], fb[2], len(fb[0])]
+            self.state[i] = agent.state
 
         # =======================================================
-        # 3. 奖励计算 (Reward) - 基于 OSPA
+        # 3. 奖励计算 (Reward) - 复合奖励
         # =======================================================
-        # 提取全局估计位置 (权重 > 0.5)
-        est_w, est_m = global_state[0], global_state[1]
-        est_pos = []
-        for idx, w in enumerate(est_w):
-            if w > 0.5:
-                est_pos.append(est_m[idx][[0, 2]]) # 取 [x, y]
-
-        # 获取当前真值位置 (注意 step_count 索引)
-        # trajectories 索引从 0 开始 (对应 t=1)
-        current_step_idx = self.step_count - 1
-        if current_step_idx < len(self.trajectories):
-            current_gt = [t[[0, 2]] for t in self.trajectories[current_step_idx]]
-        else:
-            current_gt = []
-
-        # 计算 OSPA
-        ospa_score = self._calculate_ospa(est_pos, current_gt, c=200, p=2)
-        
-        # 构造奖励 (OSPA 越小越好)
-        # 基础奖励: -OSPA/200 (范围 -1 ~ 0)
-        step_reward = -1.0 * (ospa_score / 200.0)
-        # 额外奖励: 找到目标
-        if ospa_score < 50:
-            step_reward += 0.5
+        # 按论文设计，对每个智能体计算:
+        # R = lambda1 * r_track + lambda2 * r_new + lambda3 * r_overlap + lambda4 * r_bound
+        per_agent_reward = []
+        for i in range(self.n_agents):
+            reward_i = self._compute_reward(i, self.state[i])
+            per_agent_reward.append(reward_i)
 
         # =======================================================
         # 4. 输出打包
@@ -305,14 +306,17 @@ class TargetSearchEnv(gym.Env):
         episode_done = (self.step_count >= self.max_steps)
 
         for i in range(self.n_agents):
-            rewards.append([step_reward]) # 共享奖励 (或者你可以设计个体奖励)
-            self.total_reward[i] += step_reward
+            rewards.append([per_agent_reward[i]])
+            self.total_reward[i] += per_agent_reward[i]
             dones.append(episode_done)
             infos.append({
-                'ospa': ospa_score
+                'reward': per_agent_reward[i]
             })
 
         return obs_n, rewards, dones, infos
+
+    def _calculate_ospa(self, est_pos, gt_pos, c=200, p=2):
+        return ospa(est_pos, gt_pos, c=c, p=p)
 
     def _get_observations_dual(self):
         obs_n = []
@@ -420,28 +424,27 @@ class TargetSearchEnv(gym.Env):
         实现论文 4.3 节的奖励函数
         R = lambda1 * r_track + lambda2 * r_new + lambda3 * r_overlap + lambda4 * r_bound
         """
-        weights, _, covs, n_est = phd_state
+        _, _, covs, n_est = phd_state
         
         # 1. 跟踪精度奖励 r_track (公式 13)
         # r_track = - sum(tr(P)) + beta * (N_k+1 - N_k)
-        # 注意：论文公式是 -sum(tr)，表示惩罚不确定性。
-        # 这里的 N_k+1 - N_k 项，如果是为了防止丢失目标，当 N 减小时应惩罚。
-        # 这里实现为：如果不确定性低，奖励高；如果基数增加，奖励高。
         trace_sum = 0
-        for w, P in zip(weights, covs):
-            if w > 0.1: # 仅统计有效分量
-                trace_sum += w * (P[0,0] + P[2,2])
+        for P in covs:
+            # P 对应状态 [x, vx, y, vy]，位置协方差迹为 P_xx + P_yy
+            trace_sum += (P[0, 0] + P[2, 2])
         
-        prev_N = self.cardinality_history[agent_i][-1]
+        prev_N = self.cardinality_history[agent_i][-1] if self.cardinality_history[agent_i] else 0
         delta_N = n_est - prev_N
         beta = 1.0 # 权重系数，需调优
         r_track = - trace_sum + beta * delta_N
         
         # 2. 新目标发现奖励 r_new (公式 24)
+        # r_new = alpha * N_k, if N_k > max{N_{k-L}, ..., N_{k-1}}, else 0
         history_max = max(self.cardinality_history[agent_i]) if self.cardinality_history[agent_i] else 0
-        r_new = 0
+        alpha = 1.0
+        r_new = 0.0
         if n_est > history_max:
-            r_new = 1.0 # alpha, 固定正向奖励
+            r_new = alpha * n_est
         
         # 更新历史
         self.cardinality_history[agent_i].append(n_est)
@@ -449,32 +452,30 @@ class TargetSearchEnv(gym.Env):
             self.cardinality_history[agent_i].pop(0)
 
         # 3. 视域重叠度奖励 r_overlap (公式 26, 27)
-        # 计算该智能体与其他智能体的重叠率
-        r_overlap = 0
+        # rho_i = |F_i ∩ (U_j F_j)| / |F_i|, r_overlap = delta * rho_i
         current_pos = self.agent_pos[agent_i]
+        d = self.sensor_r
+        area_i = np.pi * d**2
+        overlap_union_area = 0.0
+
         for j in range(self.n_agents):
-            if agent_i == j: continue
+            if agent_i == j:
+                continue
             other_pos = self.agent_pos[j]
             dist = np.linalg.norm(current_pos - other_pos)
             
             # 计算两个圆的重叠面积
-            # d = sensor_r
-            d = self.sensor_r
             if dist >= 2 * d:
                 overlap_area = 0
             else:
                 # 圆重叠面积公式
                 angle1 = 2 * np.arccos(dist / (2 * d))
-                overlap_area = 0.5 * d**2 * (angle1 - np.sin(angle1)) * 2 # 对称
-            
-            area_i = np.pi * d**2
-            rho_i = overlap_area / area_i
-            
-            # 高斯函数奖励/惩罚
-            # 旨在维持一个理想的重叠率 rho_star
-            sigma = 0.1
-            r_overlap_j = self.delta_overlap * np.exp( - (rho_i - self.rho_star)**2 / (2 * sigma**2) )
-            r_overlap += r_overlap_j
+                overlap_area = d**2 * (angle1 - np.sin(angle1))
+            overlap_union_area += overlap_area
+
+        # 对并集近似做上界截断，避免重复叠加导致超过自身面积
+        rho_i = min(overlap_union_area, area_i) / area_i if area_i > 0 else 0.0
+        r_overlap = self.delta_overlap * rho_i
 
         # 4. 边界惩罚 r_bound (公式 28)
         # 计算到最近边界的距离
@@ -659,9 +660,9 @@ class TargetSearchEnv(gym.Env):
                 rel_theta = (rel_theta + np.pi) % (2 * np.pi) - np.pi
                 
                 # 漏检与噪声
-                if np.random.rand() < self.track_params["Pd"]:
-                    std_r = np.sqrt(self.track_params["obverser_R"][0,0])
-                    std_theta = np.sqrt(self.track_params["obverser_R"][1,1])
+                if np.random.rand() < self.base_model_params["Pd"]:
+                    std_r = np.sqrt(self.base_model_params["obverser_R"][0,0])
+                    std_theta = np.sqrt(self.base_model_params["obverser_R"][1,1])
                     
                     meas_r = true_dist + np.random.randn() * std_r
                     meas_theta = rel_theta + np.random.randn() * std_theta
@@ -670,7 +671,7 @@ class TargetSearchEnv(gym.Env):
                     z_list.append(np.array([meas_r, meas_theta]))
         
         # 杂波 (Poisson)
-        n_clutter = np.random.poisson(self.track_params["Zr"])
+        n_clutter = np.random.poisson(self.base_model_params["Zr"])
         for _ in range(n_clutter):
             c_r = np.random.uniform(0, self.sensor_r)
             c_theta = np.random.uniform(-np.pi, np.pi)

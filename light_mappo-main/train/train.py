@@ -70,6 +70,7 @@ def make_eval_env(all_args):
                     n_agent=all_args.num_agents,
                     max_steps=all_args.episode_length
                 )
+                env = FlattenObservation(env)
             else:
                 print("Can not support the " + all_args.env_name + " environment.")
                 raise NotImplementedError
@@ -83,7 +84,7 @@ def make_eval_env(all_args):
 
         return init_env
 
-    return DummyVecEnv([get_env_fn(i) for i in range(all_args.n_rollout_threads)])
+    return DummyVecEnv([get_env_fn(i) for i in range(all_args.n_eval_rollout_threads)])
 
 
 def parse_args(args, parser):
@@ -172,34 +173,21 @@ def main(args):
     envs = make_train_env(all_args)  #训练env
     eval_envs = make_eval_env(all_args) if all_args.use_eval else None   #评估env
         
-    # 强制修正 share_observation_space
+    # 检查 share_observation_space 与实际拼接规则一致
     if all_args.use_centralized_V:
-        # 1. 获取真实的局部观测维度 (1027)
-        # 注意：envs.observation_space[0] 可能是 Box(1027,)
         obs_dim = envs.observation_space[0].shape[0] 
-        
-        # 2. 获取智能体数量 (2)
-        # 注意：这里我们直接用 envs.n_agents 或 all_args.num_agents
         num_agents = all_args.num_agents
-        
-        # 3. 计算正确的共享维度 (1027 * 2 = 2054)
-        correct_share_dim = obs_dim * num_agents
-        
-        print(f"[Forced Fix] Correcting share_obs_dim from Unknown to {correct_share_dim}")
-        
-        # 4. 创建新的 Space 对象
-        new_share_space = spaces.Box(
-            low=-np.inf, high=np.inf, 
-            shape=(correct_share_dim,), 
-            dtype=np.float32
+        expected_share_dim = obs_dim * num_agents
+        actual_share_dim = envs.share_observation_space[0].shape[0]
+        assert actual_share_dim == expected_share_dim, (
+            f"share_obs_dim mismatch: got {actual_share_dim}, expected {expected_share_dim}"
         )
-        
-        # 5. 暴力覆盖 envs 中的定义
-        # wrapper 通常是一个 list 结构，我们需要覆盖它
-        envs.share_observation_space = [new_share_space for _ in range(num_agents)]
-        
+
         if eval_envs:
-            eval_envs.share_observation_space = [new_share_space for _ in range(num_agents)]
+            eval_share_dim = eval_envs.share_observation_space[0].shape[0]
+            assert eval_share_dim == expected_share_dim, (
+                f"eval share_obs_dim mismatch: got {eval_share_dim}, expected {expected_share_dim}"
+            )
 
 
     num_agents = all_args.num_agents

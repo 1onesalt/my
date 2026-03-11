@@ -37,15 +37,27 @@ class SeparatedReplayBuffer(object):
 
 
 
-        self.share_obs = {
-            k: np.zeros((self.episode_length + 1, self.n_rollout_threads, *v), dtype=np.float32)
-            for k, v in share_obs_shape.items()
-        }
+        if isinstance(share_obs_shape, dict):
+            self.share_obs = {
+                k: np.zeros((self.episode_length + 1, self.n_rollout_threads, *v), dtype=np.float32)
+                for k, v in share_obs_shape.items()
+            }
+        else:
+            self.share_obs = np.zeros(
+                (self.episode_length + 1, self.n_rollout_threads, *share_obs_shape),
+                dtype=np.float32,
+            )
 
-        self.obs = {
-            k: np.zeros((self.episode_length + 1, self.n_rollout_threads, *v), dtype=np.float32)
-            for k, v in obs_shape.items()
-        }
+        if isinstance(obs_shape, dict):
+            self.obs = {
+                k: np.zeros((self.episode_length + 1, self.n_rollout_threads, *v), dtype=np.float32)
+                for k, v in obs_shape.items()
+            }
+        else:
+            self.obs = np.zeros(
+                (self.episode_length + 1, self.n_rollout_threads, *obs_shape),
+                dtype=np.float32,
+            )
 
 
 

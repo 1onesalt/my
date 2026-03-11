@@ -84,19 +84,9 @@ class FlattenObservation(gym.ObservationWrapper):
                 )
             )
 
-        # --- 新增: 定义 share_observation_space (全局观测) ---
-        # 1. 计算全局特征维度
-        # Global Grid (16*16*4 = 1024)
-        self.share_grid_dim = self.grid_dim 
-        
-        # Joint State (N * 3)
-        self.joint_state_dim = env.n_agents * 3
-        
-        # Share Obs Total Dim
-        self.share_total_dim = self.share_grid_dim + self.joint_state_dim
-        
-        # 2. 定义 Space (Gym 格式)
-        # MAPPO 要求这是一个列表，长度为 n_agents
+        # Critic 输入约定：拼接所有智能体的局部扁平观测
+        self.share_total_dim = self.total_dim * env.n_agents
+
         self.share_observation_space = []
         for _ in range(env.n_agents):
             self.share_observation_space.append(
@@ -127,21 +117,8 @@ class FlattenObservation(gym.ObservationWrapper):
     def step(self, actions):
             # 1. 执行环境步
             obs_n, rewards, dones, infos = self.env.step(actions)
-            
-            # 2. 获取并压平全局观测
-            global_grid, joint_state = self.env._get_global_observation()
-            flat_global_grid = global_grid.flatten()
-            
-            # 拼接: [Global Grid Flat | Joint State]
-            share_obs = np.concatenate([flat_global_grid, joint_state])
-            
-            # 3. 注入到 info 中
-            # light_mappo 的 Runner 会在 collect 数据时检查 info['share_obs']
-            # 如果存在，就会用它来填充 Buffer 中的 share_obs
-            for info in infos:
-                info['share_obs'] = share_obs
-                
-            # 4. 返回压平后的局部观测
+
+            # 2. 返回压平后的局部观测
             flat_obs_n = self.observation(obs_n)
             
             return flat_obs_n, rewards, dones, infos

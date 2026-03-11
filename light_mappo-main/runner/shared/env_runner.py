@@ -35,6 +35,15 @@ class EnvRunner(Runner):  #继承Runner
     def __init__(self, config):
         super(EnvRunner, self).__init__(config)
 
+    def _build_share_obs(self, obs):
+        """Build centralized critic input from local observations."""
+        if self.use_centralized_V:
+            share_obs = obs.reshape(self.n_rollout_threads, -1)
+            share_obs = np.expand_dims(share_obs, 1).repeat(self.num_agents, axis=1)
+        else:
+            share_obs = obs
+        return share_obs
+
     def run(self):
         self.warmup()  #重置环境
 
@@ -58,17 +67,6 @@ class EnvRunner(Runner):  #继承Runner
 
                 # Obser reward and next obs
                 obs, rewards, dones, infos = self.envs.step(actions_env)
-
-                # [关键逻辑] 从 infos 提取全局融合图作为 share_obs
-                share_obs_list = []
-                for i in range(self.n_rollout_threads):
-                    thread_infos = infos[i] # 可能是 tuple 或 list
-                    thread_share = []
-                    for agent_info in thread_infos:
-                        thread_share.append(agent_info['share_obs'])
-                    share_obs_list.append(thread_share)
-                
-                share_obs = np.array(share_obs_list)
 
                 data = (
                     obs,
@@ -145,18 +143,8 @@ class EnvRunner(Runner):  #继承Runner
         # else:
         #     share_obs = obs
 
-        # 构建初始 Share Obs (t=0时刻融合图为空，用Local Obs代替)
-        if self.use_centralized_V:
-            if isinstance(obs, dict):
-                grid = obs['polar_grid']
-                state = obs['self_state']
-                batch, agents = grid.shape[0], grid.shape[1]
-                grid_flat = grid.reshape(batch, agents, -1)
-                share_obs = np.concatenate([grid_flat, state], axis=-1)
-            else:
-                share_obs = obs.copy()
-        else:
-            share_obs = obs
+        # 构建初始 Share Obs，与每一步 insert 使用同一逻辑，避免前后不一致。
+        share_obs = self._build_share_obs(obs)
         
         if isinstance(self.buffer.share_obs, dict):
              for key in self.buffer.share_obs:
@@ -289,11 +277,7 @@ class EnvRunner(Runner):  #继承Runner
         masks = np.ones((self.n_rollout_threads, self.num_agents, 1), dtype=np.float32)
         masks[dones == True] = np.zeros(((dones == True).sum(), 1), dtype=np.float32)
 
-        if self.use_centralized_V:
-            share_obs = obs.reshape(self.n_rollout_threads, -1)
-            share_obs = np.expand_dims(share_obs, 1).repeat(self.num_agents, axis=1)
-        else:
-            share_obs = obs
+        share_obs = self._build_share_obs(obs)
 
 
         self.buffer.insert(
