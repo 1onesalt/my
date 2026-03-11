@@ -7,7 +7,14 @@ from gym.spaces import Dict, Box
 import copy
 from MY_ENV.utils.action_space import MultiAgentActionSpace
 from MY_ENV.utils.observation_space import MultiAgentObservationSpace
-from MY_ENV.envs.target_model import model, targets, target_CV, observe_Fov, polar2dicaer
+from MY_ENV.envs.target_model import (
+    model,
+    targets,
+    target_CV,
+    observe_Fov,
+    polar2dicaer,
+    distance_dependent_meas_sigma,
+)
 from MY_ENV.envs.PHD import PHD, State_extraction, generate
 from MY_ENV.envs.phd_fusion import AGMFusionCenter
 from MY_ENV.envs.OSPA import ospa
@@ -171,6 +178,13 @@ class TargetSearchEnv(gym.Env):
         self.lambda4 = 0.5  # r_bound
         self.rho_star = 0.1 # 理想重叠率
         self.delta_overlap = 1.0 # 重叠奖励权重
+        # 跟踪项稳健化参数：防止协方差大时出现极端负奖励，诱导“放弃跟踪”
+        self.track_beta = 1.0
+        self.track_cov_scale = 2.0
+        self.max_cov_trace_for_reward = 4000.0
+        # 调试输出控制
+        self.enable_position_debug = True
+        self.position_debug_interval = 10
         
         # 历史基数记录 (用于 r_new)
         self.history_window = 5
@@ -286,6 +300,7 @@ class TargetSearchEnv(gym.Env):
         for i, agent in enumerate(self.tracking_agents):
             fb = feedback_list[i]
             # [w, m, P, n]
+            # PHD 内部 state[3] 语义是分量个数(整数)，用于 for range(J_priori)
             agent.state = [fb[0], fb[1], fb[2], len(fb[0])]
             self.state[i] = agent.state
 
@@ -313,6 +328,7 @@ class TargetSearchEnv(gym.Env):
                 'reward': per_agent_reward[i]
             })
 
+        self._debug_print_positions()
         return obs_n, rewards, dones, infos
 
     def _calculate_ospa(self, est_pos, gt_pos, c=200, p=2):
@@ -424,19 +440,29 @@ class TargetSearchEnv(gym.Env):
         实现论文 4.3 节的奖励函数
         R = lambda1 * r_track + lambda2 * r_new + lambda3 * r_overlap + lambda4 * r_bound
         """
-        _, _, covs, n_est = phd_state
+        weights, _, covs, _ = phd_state
+        # 奖励中的基数估计使用权重和，避免把分量个数误当目标数
+        n_est = float(sum(weights)) if weights else 0.0
         
         # 1. 跟踪精度奖励 r_track (公式 13)
         # r_track = - sum(tr(P)) + beta * (N_k+1 - N_k)
-        trace_sum = 0
-        for P in covs:
+        weighted_trace_sum = 0.0
+        weight_sum = 0.0
+        for w, P in zip(weights, covs):
             # P 对应状态 [x, vx, y, vy]，位置协方差迹为 P_xx + P_yy
-            trace_sum += (P[0, 0] + P[2, 2])
+            # 用权重加权，避免大量低权重虚警分量把惩罚无限拉大
+            trace_pos = max(0.0, float(P[0, 0] + P[2, 2]))
+            w_eff = max(0.0, float(w))
+            weighted_trace_sum += w_eff * trace_pos
+            weight_sum += w_eff
+
+        avg_trace = weighted_trace_sum / (weight_sum + 1e-6)
+        # 对协方差惩罚做压缩，降低极端负值对策略的主导作用
+        cov_penalty = np.log1p(min(avg_trace, self.max_cov_trace_for_reward))
         
         prev_N = self.cardinality_history[agent_i][-1] if self.cardinality_history[agent_i] else 0
         delta_N = n_est - prev_N
-        beta = 1.0 # 权重系数，需调优
-        r_track = - trace_sum + beta * delta_N
+        r_track = -self.track_cov_scale * cov_penalty + self.track_beta * delta_N
         
         # 2. 新目标发现奖励 r_new (公式 24)
         # r_new = alpha * N_k, if N_k > max{N_{k-L}, ..., N_{k-1}}, else 0
@@ -494,6 +520,12 @@ class TargetSearchEnv(gym.Env):
                         self.lambda3 * r_overlap + 
                         self.lambda4 * r_bound)
                         
+                # 在 _compute_reward 函数末尾添加：
+        if self.step_count % 10 == 0:  # 每10步打印一次看看
+            print(f"Agent {agent_i} | Total: {total_reward:.2f} | "
+                f"Track: {r_track:.2f} | New: {r_new:.2f} | "
+                f"Overlap: {r_overlap:.2f} | Bound: {r_bound:.2f} | Est_N: {n_est}")
+            
         return total_reward
 
     def _init_targets(self):
@@ -661,8 +693,9 @@ class TargetSearchEnv(gym.Env):
                 
                 # 漏检与噪声
                 if np.random.rand() < self.base_model_params["Pd"]:
-                    std_r = np.sqrt(self.base_model_params["obverser_R"][0,0])
-                    std_theta = np.sqrt(self.base_model_params["obverser_R"][1,1])
+                    std_r, std_theta = distance_dependent_meas_sigma(
+                        true_dist, self.base_model_params, angle_unit="rad"
+                    )
                     
                     meas_r = true_dist + np.random.randn() * std_r
                     meas_theta = rel_theta + np.random.randn() * std_theta
@@ -678,5 +711,34 @@ class TargetSearchEnv(gym.Env):
             z_list.append(np.array([c_r, c_theta]))
             
         return z_list
+
+    def _debug_print_positions(self):
+        """调试输出：传感器与真实目标位置。"""
+        if not self.enable_position_debug:
+            return
+        if self.position_debug_interval <= 0:
+            return
+        if self.step_count % self.position_debug_interval != 0:
+            return
+
+        print(f"[Step {self.step_count}] Sensor and target positions")
+        for i in range(self.n_agents):
+            sx, sy = self.agent_pos[i][0], self.agent_pos[i][1]
+            shead = self.agent_headings[i]
+            print(f"  Sensor {i}: x={sx:.1f}, y={sy:.1f}, heading={shead:.2f} rad")
+
+        current_step_idx = self.step_count - 1
+        if current_step_idx < 0 or current_step_idx >= len(self.trajectories):
+            print("  Targets: unavailable for current step")
+            return
+
+        current_targets = self.trajectories[current_step_idx]
+        if len(current_targets) == 0:
+            print("  Targets: none")
+            return
+
+        for k, target in enumerate(current_targets):
+            tx, ty = target[0], target[2]
+            print(f"  Target {k}: x={tx:.1f}, y={ty:.1f}")
 
 

@@ -1,6 +1,5 @@
 import numpy as np
 from scipy.optimize import linear_sum_assignment
-from scipy.linalg import block_diag
 
 class AGMFusionCenter:
     """
@@ -13,175 +12,126 @@ class AGMFusionCenter:
         self.Jmax = 100       # 最大目标数限制
         
     def run(self, list_of_local_phds, sensor_configs):
-        """
-        执行融合
-        :param list_of_local_phds: 各智能体的 PHD 状态 [[w,m,P,n], ...]
-        :param sensor_configs: 传感器配置列表 [{'x':, 'y':, 'range':, 'fov_angle':}, ...]
-        :return: 全局 PHD 状态 [W, M, P, N]
-        """
+        """按 Matlab 版序贯 AGM 逻辑进行集中融合。"""
         num_sensors = len(list_of_local_phds)
         if num_sensors == 0:
             return [[], [], [], 0]
 
-        # --- 1. 建立粒子簇 (Clustering) ---
-        # 将所有传感器上传的粒子按空间位置归类
-        clusters = self._cluster_particles(list_of_local_phds, num_sensors)
-        
-        if not clusters:
-            return [[], [], [], 0]
-
-        # --- 2. 簇内视域感知 AGM 融合 ---
-        W_fused, M_fused, P_fused = [], [], []
-
-        for cluster in clusters:
-            components = cluster['components'] # list of (w, m, P, sensor_id)
-            
-            # A. 几何融合 (Geometric): 融合位置与协方差
-            # 利用 GCI (Generalized Covariance Intersection) 提升精度
-            # 公式: P_f = inv( sum(inv(P_i)) ), m_f = P_f * sum(inv(P_i)*m_i)
-            
-            inf_mat_sum = np.zeros_like(components[0][2]) # 信息矩阵和
-            weighted_mean_sum = np.zeros_like(components[0][1])
-            
-            for (_, m, P, _) in components:
-                try:
-                    inv_P = np.linalg.inv(P)
-                except:
-                    inv_P = np.linalg.pinv(P)
-                inf_mat_sum += inv_P
-                weighted_mean_sum += inv_P @ m
-            
-            try:
-                P_f = np.linalg.inv(inf_mat_sum)
-            except:
-                P_f = np.linalg.pinv(inf_mat_sum)
-            m_f = P_f @ weighted_mean_sum
-
-            # B. 算术融合 (Arithmetic) + 视域校验 (FoV Check)
-            # 这是防止数据乱伦的关键步骤
-            
-            w_accumulated = 0.0
-            valid_sensor_count = 0 # 分母：只有视域覆盖了目标的传感器才有资格投票
-            
-            target_pos = m_f[[0, 2]] # 假设状态是 [x, vx, y, vy]
-            
-            for i in range(num_sensors):
-                # 检查传感器 i 是否在 cluster 中贡献了粒子
-                w_contrib = 0.0
-                has_detection = False
-                
-                for (w, _, _, sid) in components:
-                    if sid == i:
-                        w_contrib = w
-                        has_detection = True
-                        break
-                
-                # 视域逻辑核心：
-                if has_detection:
-                    # Case 1: 看到了 -> 累加权重
-                    w_accumulated += w_contrib
-                    valid_sensor_count += 1
-                else:
-                    # 没看到，需要判断原因
-                    sensor_pos = np.array([sensor_configs[i]['x'], sensor_configs[i]['y']])
-                    dist = np.linalg.norm(target_pos - sensor_pos)
-                    
-                    if dist <= sensor_configs[i]['range']:
-                        # Case 2: 在视域内但没看到 (漏检/确认消失) -> 累加 0，分母+1
-                        # 这会显著拉低该目标的平均权重
-                        w_accumulated += 0.0
-                        valid_sensor_count += 1
-                    else:
-                        # Case 3: 不在视域内 -> 不知情
-                        # 不累加权重，也不增加分母 (相当于它弃权)
-                        pass 
-
-            # 如果没有任何传感器覆盖该区域（不太可能，因为至少有一个传感器看到了），兜底处理
-            if valid_sensor_count == 0:
-                valid_sensor_count = 1
-            
-            # 计算最终权重
-            w_f = w_accumulated / valid_sensor_count
-            
-            # 只有经过确认依然存在的粒子才保留
-            if w_f > 1e-4:
-                W_fused.append(w_f)
-                M_fused.append(m_f)
-                P_fused.append(P_f)
-
-        # --- 3. 数量限制 ---
-        if len(W_fused) > self.Jmax:
-            indices = np.argsort(W_fused)[::-1][:self.Jmax]
-            W_fused = [W_fused[i] for i in indices]
-            M_fused = [M_fused[i] for i in indices]
-            P_fused = [P_fused[i] for i in indices]
-            
-        return [W_fused, M_fused, P_fused, sum(W_fused)]
-
-    def _cluster_particles(self, list_of_local_phds, num_sensors):
-        """
-        辅助函数：使用匈牙利算法进行序贯聚类
-        """
-        # 1. 找基准 (Base)
-        base_idx = -1
+        # 1) 选择第一个非空局部后验作为序贯融合基准
+        base_idx = None
         for i in range(num_sensors):
-            if list_of_local_phds[i][0]:
+            if list_of_local_phds[i][3] != 0:
                 base_idx = i
                 break
-        if base_idx == -1: return []
+        if base_idx is None:
+            return [[], [], [], 0]
 
-        clusters = []
-        w_base, m_base, P_base = list_of_local_phds[base_idx][0], list_of_local_phds[base_idx][1], list_of_local_phds[base_idx][2]
-        
-        # 初始化簇
-        for j in range(len(w_base)):
-            clusters.append({
-                'components': [(w_base[j], m_base[j], P_base[j], base_idx)]
-            })
+        W_ref = [float(w) for w in list_of_local_phds[base_idx][0]]
+        M_ref = [np.array(m, dtype=float) for m in list_of_local_phds[base_idx][1]]
+        P_ref = [np.array(P, dtype=float) for P in list_of_local_phds[base_idx][2]]
+        t_f = 1
 
-        # 2. 遍历其他传感器进行匹配
-        for i in range(num_sensors):
-            if i == base_idx: continue
-            w_new, m_new, P_new = list_of_local_phds[i][0], list_of_local_phds[i][1], list_of_local_phds[i][2]
-            if not w_new: continue
+        # 2) 依次融合其他有分量的传感器
+        for i in range(base_idx + 1, num_sensors):
+            w2, m2, p2, n2 = list_of_local_phds[i]
+            if n2 == 0:
+                continue
 
-            # 构建代价矩阵
-            n_clusters = len(clusters)
-            n_particles = len(w_new)
-            cost_matrix = np.full((n_clusters, n_particles), 1e9)
+            W2 = [float(w) for w in w2]
+            M2 = [np.array(m, dtype=float) for m in m2]
+            P2 = [np.array(P, dtype=float) for P in p2]
+            t_f += 1
+            pi_1 = 1.0 - 1.0 / t_f
+            pi_2 = 1.0 / t_f
 
-            for r in range(n_clusters):
-                # 简化计算：只比对簇中第一个粒子
-                target_m = clusters[r]['components'][0][1] 
-                target_P = clusters[r]['components'][0][2]
-                try:
-                    inv_P = np.linalg.inv(target_P)
-                except:
-                    inv_P = np.linalg.pinv(target_P)
+            match_map, mat_match = self._match_components(M_ref, P_ref, M2)
 
-                for c in range(n_particles):
-                    diff = m_new[c] - target_m
-                    dist = diff.T @ inv_P @ diff
-                    if dist < self.T_merge:
-                        cost_matrix[r, c] = dist
+            W_new, M_new, P_new = [], [], []
 
-            # 匈牙利匹配
-            row_ind, col_ind = linear_sum_assignment(cost_matrix)
-            matched_cols = set()
-            
-            for r, c in zip(row_ind, col_ind):
-                if cost_matrix[r, c] < self.T_merge:
-                    clusters[r]['components'].append((w_new[c], m_new[c], P_new[c], i))
-                    matched_cols.add(c)
-            
-            # 未匹配的粒子新建簇
-            for c in range(n_particles):
-                if c not in matched_cols:
-                    clusters.append({
-                        'components': [(w_new[c], m_new[c], P_new[c], i)]
-                    })
-                    
-        return clusters
+            # (a) 匹配组 AGM 融合
+            for j, k in enumerate(match_map):
+                if k < 0:
+                    continue
+                P1_inv = self._safe_inv(P_ref[j])
+                P2_inv = self._safe_inv(P2[k])
+                info = pi_1 * P1_inv + pi_2 * P2_inv
+                P_f = self._safe_inv(info)
+                m_f = P_f @ (pi_1 * P1_inv @ M_ref[j] + pi_2 * P2_inv @ M2[k])
+                P_f = 0.5 * (P_f + P_f.T)
+
+                W_new.append(pi_1 * W_ref[j] + pi_2 * W2[k])
+                M_new.append(m_f)
+                P_new.append(P_f)
+
+            # (b) part1 未匹配：FoV 内衰减、FoV 外保持
+            sensor_pos = np.array([sensor_configs[i]['x'], sensor_configs[i]['y']], dtype=float)
+            sensor_r = float(sensor_configs[i]['range'])
+            for j in range(len(W_ref)):
+                if np.any(mat_match[j, :] == 1):
+                    continue
+                target_pos = np.array([M_ref[j][0], M_ref[j][2]])
+                in_fov = np.linalg.norm(target_pos - sensor_pos) <= sensor_r
+                w_tmp = pi_1 * W_ref[j] if in_fov else W_ref[j]
+                W_new.append(w_tmp)
+                M_new.append(M_ref[j])
+                P_new.append(P_ref[j])
+
+            # (c) part2 未匹配：直接引入（新发现）
+            for k in range(len(W2)):
+                if np.any(mat_match[:, k] == 1):
+                    continue
+                W_new.append(W2[k])
+                M_new.append(M2[k])
+                P_new.append(P2[k])
+
+            W_ref, M_ref, P_ref = W_new, M_new, P_new
+
+        # 3) 最多保留 Jmax 个高权重分量
+        if len(W_ref) > self.Jmax:
+            keep = np.argsort(W_ref)[::-1][:self.Jmax]
+            W_ref = [W_ref[idx] for idx in keep]
+            M_ref = [M_ref[idx] for idx in keep]
+            P_ref = [P_ref[idx] for idx in keep]
+
+        return [W_ref, M_ref, P_ref, len(W_ref)]
+
+    def _safe_inv(self, M):
+        try:
+            return np.linalg.inv(M)
+        except np.linalg.LinAlgError:
+            return np.linalg.pinv(M)
+
+    def _match_components(self, M1, P1, M2):
+        """
+        Matlab `ALG3_Match` 的 Python 实现：
+        - 构造距离矩阵
+        - 阈值截断
+        - 匈牙利匹配
+        - 超阈值配对置零
+        """
+        n1 = len(M1)
+        n2 = len(M2)
+        if n1 == 0 or n2 == 0:
+            return np.full(n1, -1, dtype=int), np.zeros((n1, n2), dtype=int)
+
+        cost = np.full((n1, n2), self.T_merge, dtype=float)
+        for i in range(n1):
+            invP = self._safe_inv(P1[i])
+            for j in range(n2):
+                diff = M2[j] - M1[i]
+                d = float(diff.T @ invP @ diff)
+                cost[i, j] = min(self.T_merge, d)
+
+        row_ind, col_ind = linear_sum_assignment(cost)
+        match_map = np.full(n1, -1, dtype=int)
+        mat_match = np.zeros((n1, n2), dtype=int)
+
+        for r, c in zip(row_ind, col_ind):
+            if cost[r, c] < self.T_merge:
+                match_map[r] = c
+                mat_match[r, c] = 1
+
+        return match_map, mat_match
     
     def distribute_to_sensors(self, global_state, sensor_configs):
         """

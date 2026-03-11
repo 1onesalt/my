@@ -1,6 +1,12 @@
 import numpy as np
 import random
 from scipy.linalg import sqrtm
+from MY_ENV.envs.target_model import distance_dependent_meas_sigma
+
+
+def _wrap_angle_deg(angle):
+    """Wrap angle into [-180, 180)."""
+    return (angle + 180.0) % 360.0 - 180.0
 
 
 def generate(z_lastD, nums_z_lastD, z_nowD, nums_z_nowD, Vx_thre, Vy_thre):
@@ -26,8 +32,8 @@ def generate(z_lastD, nums_z_lastD, z_nowD, nums_z_nowD, Vx_thre, Vy_thre):
                      -Vy_max if abs(z_delta[1]) > Vy_max and z_delta[1] < 0 else z_delta[1]
                 m = [z_nowD[0, i], vx, z_nowD[1, i], vy]
                 m_new.append(m)
-                w_new.append(0.01)
-                P_new.append(np.diag([100, 400, 100, 400]))
+                w_new.append(0.2)
+                P_new.append(np.diag([1000, 100, 1000, 100]))
 
     # 转为numpy数组
     w_new = np.array(w_new)
@@ -75,7 +81,9 @@ def UKFpart(X_fusion_pre, P_fusion_pre, R, x_radar, y_radar):
     #计算撒点的观测值
     for i in range(2 * n_num + 1):    
         Z_ob_diffusion[i, 0] = np.sqrt((X_pre_diffusion[i, 0] - x_radar) ** 2 + (X_pre_diffusion[i, 2] - y_radar) ** 2)  #距离
-        theta_sus_head = np.rad2deg(np.arctan((X_pre_diffusion[i, 2] - y_radar) / (X_pre_diffusion[i, 0] - x_radar)))
+        theta_sus_head = np.rad2deg(
+            np.arctan2((X_pre_diffusion[i, 2] - y_radar), (X_pre_diffusion[i, 0] - x_radar))
+        )
 
         if np.logical_and(X_pre_diffusion[i, 0] - x_radar >= 0, X_pre_diffusion[i, 2] - y_radar >= 0):
             Z_ob_diffusion[i, 1] = theta_sus_head
@@ -99,23 +107,27 @@ def UKFpart(X_fusion_pre, P_fusion_pre, R, x_radar, y_radar):
                 Z_ob_diffusion[i, 1] = Z_ob_diffusion[i, 1] - 360
         flag_jump = 1
 
-    Z_fusion_ob = np.zeros((1, 2))
+    Z_fusion_ob = np.zeros(2, dtype=float)
 
     for i in range(2 * n_num + 1):
-        Z_fusion_ob = Z_fusion_ob + w_m[i] * Z_ob_diffusion[i]
+        Z_fusion_ob = Z_fusion_ob + float(w_m[i]) * Z_ob_diffusion[i]
     
-    P_fusion_ob = R
+    P_fusion_ob = R.copy()
     for i in range(2 * n_num + 1):       
-        P_fusion_ob = P_fusion_ob + w_p[i] * (Z_ob_diffusion[i] - Z_fusion_ob).T @ (Z_ob_diffusion[i] - Z_fusion_ob) #2×2
+        dz = (Z_ob_diffusion[i] - Z_fusion_ob).reshape(2, 1)
+        P_fusion_ob = P_fusion_ob + float(w_p[i]) * (dz @ dz.T) #2×2
     
     Pzx = np.zeros((4, 2))
     for i in range(2 * n_num + 1):
         #X_fusion_pre状态向量的预测，X_pre_diffusion粒子散布
-        Pzx += w_p[i] * (X_fusion_pre - X_pre_diffusion[i]).reshape(4, 1) @ (Z_fusion_ob - Z_ob_diffusion[i])#
+        dx = (X_fusion_pre - X_pre_diffusion[i]).reshape(4, 1)
+        dz = (Z_fusion_ob - Z_ob_diffusion[i]).reshape(1, 2)
+        Pzx += float(w_p[i]) * (dx @ dz)
 
     k_ukf = Pzx @ (np.linalg.inv(P_fusion_ob))
 
     Pnew = P_fusion_pre - k_ukf @ P_fusion_ob @ k_ukf.T
+    Pnew = 0.5 * (Pnew + Pnew.T)
 
     return Z_fusion_ob, P_fusion_ob, k_ukf, Pnew, flag_jump
 
@@ -138,7 +150,7 @@ def M_UKF(X_fusion_pre, Z_polar, Z_fusion_ob, k_ukf, flag_jump):
     Z_fusion_ob = Z_fusion_ob.reshape(2, 1)
     angle_obs = Z_polar[1, 0]    # 第2行第1列
     angle_pred = Z_fusion_ob[1, 0]
-    delta_angle = Z_polar[1, 0] - Z_fusion_ob[1, 0]
+    delta_angle = _wrap_angle_deg(Z_polar[1, 0] - Z_fusion_ob[1, 0])
 
     if abs(delta_angle) > 180 and flag_jump == 0:
         if delta_angle < 0:
@@ -185,6 +197,10 @@ class PHD():
         self.Ps = 1
         self.Pd = params["Pd"]           #检测概率
         self.R = params["obverser_R"]    #观测误差矩阵
+        self.meas_sigma_r0 = params.get("meas_sigma_r0", float(np.sqrt(self.R[0, 0])))
+        self.meas_sigma_theta0_deg = params.get("meas_sigma_theta0_deg", float(np.sqrt(self.R[1, 1])))
+        self.meas_sigma_r_eta = params.get("meas_sigma_r_eta", 0.0)
+        self.meas_sigma_theta_eta_deg = params.get("meas_sigma_theta_eta_deg", 0.0)
         self.Vx_thre = 8
         self.Vy_thre = 8
         self.x_agent = params['x_agent']
@@ -194,7 +210,22 @@ class PHD():
                             [0, 1, 0, 0],
                             [0, 0, 1, self.T],
                             [0, 0, 0, 1]])
-        self.Q = np.diag([1, 0.01, 1, 0.01])   
+        self.Q = np.diag([1, 0.1, 1, 0.1])   
+
+    def _measurement_cov_from_state(self, state_mean):
+        """根据预测目标与传感器距离构造距离相关观测噪声协方差 R_k。"""
+        dx = float(state_mean[0] - self.x_agent)
+        dy = float(state_mean[2] - self.y_agent)
+        dist = np.hypot(dx, dy)
+        sigma_r, sigma_theta_deg = distance_dependent_meas_sigma(
+            dist, {
+                "meas_sigma_r0": self.meas_sigma_r0,
+                "meas_sigma_theta0_deg": self.meas_sigma_theta0_deg,
+                "meas_sigma_r_eta": float(getattr(self, "meas_sigma_r_eta", 0.0)),
+                "meas_sigma_theta_eta_deg": float(getattr(self, "meas_sigma_theta_eta_deg", 0.0)),
+            }, angle_unit="deg"
+        )
+        return np.diag([sigma_r ** 2, sigma_theta_deg ** 2])
     
     def init_params(self, z_lastD, z_nowD, z_nowP, X_last):
         self.z_lastD = z_lastD
@@ -207,7 +238,9 @@ class PHD():
         self.w_priori = self.X_last[0]  # 上一时刻权重
         self.m_priori = self.X_last[1]  # 均值
         self.P_priori = self.X_last[2]  # 协方差
-        self.J_priori = self.X_last[3]  # 先验粒子数量
+        # 先验分量数必须是整数；同时与列表长度对齐，避免越界
+        j_from_state = int(round(float(self.X_last[3]))) if len(self.X_last) > 3 else 0
+        self.J_priori = max(0, min(j_from_state, len(self.w_priori), len(self.m_priori), len(self.P_priori)))
 
 
     def predict_update(self):
@@ -255,7 +288,10 @@ class PHD():
 
             flag_jump = np.zeros((J_pre, 1))
             for i in range(J_pre):                                  
-                Z_obpre_tmp, P_z_tmp, K_ukf_tmp, P_ukf_tmp, flag_jump_tmp = UKFpart(m_pre[i], P_pre[i], self.R, self.x_agent, self.y_agent)
+                R_i = self._measurement_cov_from_state(m_pre[i])
+                Z_obpre_tmp, P_z_tmp, K_ukf_tmp, P_ukf_tmp, flag_jump_tmp = UKFpart(
+                    m_pre[i], P_pre[i], R_i, self.x_agent, self.y_agent
+                )
                 Z_obpre.append(Z_obpre_tmp)
                 P_z.append(P_z_tmp)
                 K_ukf.append(K_ukf_tmp)
@@ -279,7 +315,8 @@ class PHD():
                     z_now = self.z_nowP[i]              
 
                     # 概率密度计算
-                    diff = (z_now - Z_pred).reshape(-1)             
+                    diff = (z_now - Z_pred).reshape(-1)
+                    diff[1] = _wrap_angle_deg(diff[1])
 
                     exponent = -0.5 * diff @ np.linalg.inv(Pz_j) @ diff
                     denom = 2 * np.pi * np.sqrt(np.linalg.det(Pz_j))
@@ -294,14 +331,16 @@ class PHD():
                     m_pos.append(M_UKF(m_pre[j], z_now, Z_pred, K_ukf[j], flag_jump[j])) 
 
                 # 当前观测关联的目标更新权重归一化
-                updated_weights = w_pos[e*J_pre - J_pre:e*J_pre]
+                start_idx = J_pre + (e - 1) * J_pre
+                end_idx = J_pre + e * J_pre
+                updated_weights = w_pos[start_idx:end_idx]
                 if max(updated_weights) <= 1e-8:
-                    w_pos[e*J_pre - J_pre:e*J_pre] = [0] * J_pre
+                    w_pos[start_idx:end_idx] = [0] * J_pre
                 else:
                     w_sum = sum(updated_weights)
         
                     updated_weights = [self.Pd * w / ((self.Zr / (900**2)) + w_sum) for w in updated_weights]
-                    w_pos[e*J_pre - J_pre:e*J_pre] = updated_weights
+                    w_pos[start_idx:end_idx] = updated_weights
 
             J_pos = e * J_pre + J_pre  #存疑
 

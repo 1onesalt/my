@@ -258,5 +258,28 @@ L(\phi) = \mathbb{E}{t}\left[ \left( V\phi(s_t) - \hat{R}_t \right)^2 \right]
 
 
 \section{仿真实验与结果分析}
+传感器的观测方程如下：
+\begin{equation}
+\mathrm{z_k}=h_k(x_k)+v_k
+\end{equation}
+其中，$v_k$为观测噪声，其分布为协方差为$R_{k}$的零均值高斯噪声，
+观测函数$h_k(\cdot)$和$R_{k}$表示如下：
+\begin{equation}
+h_k(x_k)=\begin{bmatrix}\sqrt{(p_{x}-x_s)^2+(p_{y}-y_s)^2}\\\arctan(p_{x}-x_s,p_{y}-y_s)\end{bmatrix}
+\end{equation}
+\begin{equation}
+R_k=\begin{bmatrix}\sigma_r^2&0\\0&\sigma_\theta^2\end{bmatrix}
+\end{equation}
+其中，$\sigma_r$和$\sigma_\theta$分别表示在$r$和$\theta$方向上的观测噪声标准差，其值与传感器
+与目标之间的距离有关。，表示如下：
+\begin{equation}
+\begin{cases}
+\sigma_r = r_0 + \eta_r ||s_k - t_k|| \\
+\sigma_\theta = \theta_0 + \eta_\theta ||s_k - t_k||
+\end{cases}
+\end{equation}
+其中，$r_0=10m$和$\theta_0=0.5^\circ$.
+
+
 \section{本章小结}
 

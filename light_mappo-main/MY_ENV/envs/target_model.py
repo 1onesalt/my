@@ -9,7 +9,16 @@ def model():
     model_params = {}
     # 观测参数
     model_params["obverser_d"] = 200        # 观测半径
-    model_params["obverser_R"] = np.diag([10, 2]) # [距离方差, 角度方差]
+    # 距离相关噪声参数（与 chapter4 文档一致）
+    model_params["meas_sigma_r0"] = 10.0                 # m
+    model_params["meas_sigma_theta0_deg"] = 0.5          # deg
+    model_params["meas_sigma_r_eta"] = 0.02              # m/m
+    model_params["meas_sigma_theta_eta_deg"] = 0.001     # deg/m
+    # 兼容旧代码保留常量协方差（角度单位：deg）
+    model_params["obverser_R"] = np.diag([
+        model_params["meas_sigma_r0"] ** 2,
+        model_params["meas_sigma_theta0_deg"] ** 2,
+    ])
     model_params["Zr"] = 5                  # 杂波泊松参数
     model_params["Pd"] = 0.95               # 检测概率
     
@@ -23,6 +32,27 @@ def model():
     model_params['y_agent'] = 0
     
     return model_params
+
+
+def distance_dependent_meas_sigma(distance, model_params, angle_unit="deg"):
+    """
+    按传感器-目标距离计算测量标准差。
+    angle_unit: "deg" 或 "rad"
+    """
+    d = float(max(0.0, distance))
+    sigma_r0 = float(model_params.get("meas_sigma_r0", 10.0))
+    sigma_theta0_deg = float(model_params.get("meas_sigma_theta0_deg", 0.5))
+    eta_r = float(model_params.get("meas_sigma_r_eta", 0.0))
+    eta_theta_deg = float(model_params.get("meas_sigma_theta_eta_deg", 0.0))
+
+    sigma_r = sigma_r0 + eta_r * d
+    sigma_theta_deg = sigma_theta0_deg + eta_theta_deg * d
+    sigma_r = max(1e-6, sigma_r)
+    sigma_theta_deg = max(1e-6, sigma_theta_deg)
+
+    if angle_unit == "rad":
+        return sigma_r, np.deg2rad(sigma_theta_deg)
+    return sigma_r, sigma_theta_deg
 
 # --- 2. 目标生成 ---
 # 这里的参数顺序必须适配 target_search.py 的调用: targets(self.max_steps)
@@ -119,7 +149,6 @@ def observe_Fov(model_params, targets_current_step):
     obverser_d = model_params["obverser_d"]
     x_agent = model_params['x_agent']
     y_agent = model_params['y_agent']
-    obverser_R = model_params["obverser_R"] 
     Zr = model_params["Zr"] 
     Pd = model_params["Pd"] 
 
@@ -132,8 +161,13 @@ def observe_Fov(model_params, targets_current_step):
 
         if d <= obverser_d and np.random.rand() < Pd:
             r, theta = compute_r_theta_2d(x, y, x_agent, y_agent)
-            noise = np.linalg.cholesky(obverser_R) @ np.random.randn(2)
-            z_polar.append(np.array([r + noise[0], (theta + noise[1]) % 360]))
+            std_r, std_theta_deg = distance_dependent_meas_sigma(
+                d, model_params, angle_unit="deg"
+            )
+            z_polar.append(np.array([
+                r + np.random.randn() * std_r,
+                (theta + np.random.randn() * std_theta_deg) % 360,
+            ]))
 
     # 杂波
     z_polar.extend(generate_clutter_2d(x_agent, y_agent, obverser_d, Zr))
