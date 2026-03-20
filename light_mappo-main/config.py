@@ -219,6 +219,19 @@ def get_config():
     # env parameters
     parser.add_argument("--env_name", type=str, default="MyEnv", help="specify the name of environment")
     parser.add_argument(
+        "--curriculum_stage",
+        type=int,
+        default=1,
+        choices=[0, 1, 2, 3, 4, 5],
+        help="Curriculum learning stage. 0 disables curriculum override.",
+    )
+    parser.add_argument(
+        "--use_curriculum",
+        action="store_true",
+        default=False,
+        help="Enable curriculum learning. If disabled, curriculum stage is ignored.",
+    )
+    parser.add_argument(
         "--use_obs_instead_of_state",
         action="store_true",
         default=False,
@@ -455,6 +468,18 @@ def get_config():
         type=int,
         default=5,
         help="time duration between contiunous twice log printing.",
+    )
+    parser.add_argument(
+        "--disable_training_plots",
+        action="store_true",
+        default=False,
+        help="Disable auto plotting reward/loss curves after training.",
+    )
+    parser.add_argument(
+        "--plot_smooth_window",
+        type=int,
+        default=5,
+        help="Moving-average window size for reward/loss plots.",
     )
 
     # eval parameters

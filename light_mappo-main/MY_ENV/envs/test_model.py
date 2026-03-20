@@ -8,7 +8,7 @@ from scipy.linalg import sqrtm
 def model():
     model_params = {}
     # 观测参数
-    model_params["obverser_d"] = 200        # 观测半径
+    model_params["obverser_d"] = 300        # 观测半径
     model_params["meas_sigma_r0"] = 10.0                 # m
     model_params["meas_sigma_theta0_deg"] = 0.5          # deg
     model_params["meas_sigma_r_eta"] = 0.02              # m/m
@@ -21,8 +21,8 @@ def model():
     model_params["Pd"] = 0.95               # 检测概率
     
     # 区域参数
-    x_min, x_max = -1000, 1000
-    y_min, y_max = -1000, 1000
+    x_min, x_max = -2000, 2000
+    y_min, y_max = -2000, 2000
     model_params['surveillance_region'] = np.array([[x_min, x_max], [y_min, y_max]])
     
     # 占位符 (Step中动态更新)

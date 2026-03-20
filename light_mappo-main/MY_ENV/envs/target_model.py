@@ -8,7 +8,7 @@ from scipy.linalg import sqrtm
 def model():
     model_params = {}
     # 观测参数
-    model_params["obverser_d"] = 200        # 观测半径
+    model_params["obverser_d"] = 500        # 观测半径
     # 距离相关噪声参数（与 chapter4 文档一致）
     model_params["meas_sigma_r0"] = 10.0                 # m
     model_params["meas_sigma_theta0_deg"] = 0.5          # deg
@@ -23,8 +23,8 @@ def model():
     model_params["Pd"] = 0.95               # 检测概率
     
     # 区域参数
-    x_min, x_max = -1000, 1000
-    y_min, y_max = -1000, 1000
+    x_min, x_max = -2000, 2000
+    y_min, y_max = -2000, 2000
     model_params['surveillance_region'] = np.array([[x_min, x_max], [y_min, y_max]])
     
     # 占位符 (Step中动态更新)
@@ -57,7 +57,7 @@ def distance_dependent_meas_sigma(distance, model_params, angle_unit="deg"):
 # --- 2. 目标生成 ---
 # 这里的参数顺序必须适配 target_search.py 的调用: targets(self.max_steps)
 # 即第一个参数必须是 num_of_scans
-def targets(num_of_scans, n_target=5, x_range=(-800, 800), y_range=(-800, 800), v_range=(-15, 15)):
+def targets(num_of_scans, n_target=5, x_range=(-2000, 2000), y_range=(-2000, 2000), v_range=(-20, 20)):
     # 随机出生时间 (0 到 总时长的20%)
     targets_birth_time = np.random.randint(0, int(num_of_scans * 0.2) + 1, size=n_target).tolist()
     targets_death_time = [num_of_scans] * n_target

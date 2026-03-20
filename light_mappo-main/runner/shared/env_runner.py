@@ -38,7 +38,16 @@ class EnvRunner(Runner):  #继承Runner
     def _build_share_obs(self, obs):
         """Build centralized critic input from local observations."""
         if self.use_centralized_V:
-            share_obs = obs.reshape(self.n_rollout_threads, -1)
+            max_agents = self.num_agents
+            active_agents = max_agents
+            if hasattr(self.envs, "envs") and len(self.envs.envs) > 0:
+                active_agents = int(getattr(self.envs.envs[0], "active_n_agents", max_agents))
+            active_agents = max(0, min(active_agents, max_agents))
+
+            active_mask = np.zeros((self.n_rollout_threads, max_agents, 1), dtype=np.float32)
+            active_mask[:, :active_agents, 0] = 1.0
+            critic_tokens = np.concatenate([obs, active_mask], axis=-1)
+            share_obs = critic_tokens.reshape(self.n_rollout_threads, -1)
             share_obs = np.expand_dims(share_obs, 1).repeat(self.num_agents, axis=1)
         else:
             share_obs = obs
@@ -122,6 +131,7 @@ class EnvRunner(Runner):  #继承Runner
 
                 train_infos["average_episode_rewards"] = np.mean(self.buffer.rewards) * self.episode_length
                 print("average episode rewards is {}".format(train_infos["average_episode_rewards"]))
+                self.record_training_metrics(train_infos, total_num_steps)
                 self.log_train(train_infos, total_num_steps)
                 # self.log_env(env_infos, total_num_steps)
 
@@ -276,6 +286,16 @@ class EnvRunner(Runner):  #继承Runner
         )
         masks = np.ones((self.n_rollout_threads, self.num_agents, 1), dtype=np.float32)
         masks[dones == True] = np.zeros(((dones == True).sum(), 1), dtype=np.float32)
+        active_masks = np.ones((self.n_rollout_threads, self.num_agents, 1), dtype=np.float32)
+        if infos is not None:
+            for env_i in range(self.n_rollout_threads):
+                for agent_i in range(self.num_agents):
+                    try:
+                        is_active = bool(infos[env_i][agent_i].get("is_active", True))
+                    except Exception:
+                        is_active = True
+                    if not is_active:
+                        active_masks[env_i, agent_i, 0] = 0.0
 
         share_obs = self._build_share_obs(obs)
 
@@ -290,6 +310,7 @@ class EnvRunner(Runner):  #继承Runner
             values,
             rewards,
             masks,
+            active_masks=active_masks,
         )
 
     @torch.no_grad()

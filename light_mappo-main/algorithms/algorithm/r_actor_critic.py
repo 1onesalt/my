@@ -105,7 +105,8 @@ class R_Actor(nn.Module):
                     self.base = FusionCNN(
                         obs_shape, 
                         self.hidden_size, 
-                        self._use_orthogonal
+                        self._use_orthogonal,
+                        mode="single",
                     )
         elif len(obs_shape) == 3:
                     # 原有的 Image 处理逻辑
@@ -222,7 +223,7 @@ class R_Critic(nn.Module):
         if args.use_fusion_network:
             # 实例化 FusionCNN 作为 Critic 的基础网络（Base）
             # 注意：这里的 share_obs_shape 维度必须与 FusionCNN 预期的输入一致
-            self.base = FusionCNN(cent_obs_shape, self.hidden_size, self._use_orthogonal)
+            self.base = FusionCNN(cent_obs_shape, self.hidden_size, self._use_orthogonal, mode="dual")
                 # --- 修改结束 ---
         elif len(cent_obs_shape) == 3:
             self.base = CNNBase(args, cent_obs_shape)

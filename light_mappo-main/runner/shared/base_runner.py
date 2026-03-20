@@ -1,4 +1,5 @@
 import os
+import csv
 import numpy as np
 import torch
 from tensorboardX import SummaryWriter
@@ -53,9 +54,21 @@ class Runner(object):
         if not os.path.exists(self.log_dir):
             os.makedirs(self.log_dir)
         self.writter = SummaryWriter(self.log_dir)
+        self.plot_dir = str(self.run_dir / "plots")
+        if not os.path.exists(self.plot_dir):
+            os.makedirs(self.plot_dir)
         self.save_dir = str(self.run_dir / 'models')
         if not os.path.exists(self.save_dir):
             os.makedirs(self.save_dir)
+        self.enable_training_plots = not getattr(self.all_args, "disable_training_plots", False)
+        self.plot_smooth_window = max(1, int(getattr(self.all_args, "plot_smooth_window", 5)))
+        self.training_history = {
+            "step": [],
+            "average_episode_rewards": [],
+            "value_loss": [],
+            "policy_loss": [],
+            "dist_entropy": [],
+        }
 
         from algorithms.algorithm.r_mappo import RMAPPO as TrainAlgo
         from algorithms.algorithm.rMAPPOPolicy import RMAPPOPolicy as Policy
@@ -151,3 +164,117 @@ class Runner(object):
         for k, v in env_infos.items():
             if len(v)>0:
                 self.writter.add_scalars(k, {k: np.mean(v)}, total_num_steps)
+
+    def record_training_metrics(self, train_infos, total_num_steps):
+        """Cache reward/loss metrics for post-training visualization."""
+        self.training_history["step"].append(int(total_num_steps))
+        for key in ("average_episode_rewards", "value_loss", "policy_loss", "dist_entropy"):
+            value = train_infos.get(key, np.nan)
+            try:
+                value = float(np.mean(value))
+            except Exception:
+                value = np.nan
+            self.training_history[key].append(value)
+
+    @staticmethod
+    def _moving_average(values, window):
+        arr = np.asarray(values, dtype=np.float32)
+        if arr.size == 0:
+            return arr
+        window = max(1, int(window))
+        valid = ~np.isnan(arr)
+        filled = np.where(valid, arr, 0.0)
+        kernel = np.ones(window, dtype=np.float32)
+        num = np.convolve(filled, kernel, mode="same")
+        den = np.convolve(valid.astype(np.float32), kernel, mode="same")
+        if num.size != arr.size:
+            start = (num.size - arr.size) // 2
+            num = num[start:start + arr.size]
+            den = den[start:start + arr.size]
+        den = np.maximum(den, 1.0)
+        smoothed = num / den
+        smoothed[~valid] = np.nan
+        return smoothed
+
+    def plot_training_curves(self):
+        """Export reward/loss curves and cached metric csv after training."""
+        if not self.enable_training_plots:
+            print("Skip training plots: disabled by --disable_training_plots.")
+            return
+
+        steps = np.asarray(self.training_history["step"], dtype=np.int64)
+        if steps.size == 0:
+            print("Skip training plots: no recorded metrics.")
+            print("  可能原因: 1) num_env_steps 过小导致 episode=0  2) log_interval 过大 3) 训练在首次 log 前中断")
+            print(f"  绘图将保存到: {self.plot_dir}")
+            return
+
+        history_csv_path = os.path.join(self.plot_dir, "training_metrics.csv")
+        fieldnames = ["step", "average_episode_rewards", "value_loss", "policy_loss", "dist_entropy"]
+        with open(history_csv_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            for i in range(len(steps)):
+                writer.writerow(
+                    {
+                        "step": int(steps[i]),
+                        "average_episode_rewards": self.training_history["average_episode_rewards"][i],
+                        "value_loss": self.training_history["value_loss"][i],
+                        "policy_loss": self.training_history["policy_loss"][i],
+                        "dist_entropy": self.training_history["dist_entropy"][i],
+                    }
+                )
+
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+        except Exception as e:
+            print(f"Skip training curve plotting: matplotlib unavailable ({e}).")
+            print(f"Metrics csv still saved to: {history_csv_path}")
+            return
+
+        reward = np.asarray(self.training_history["average_episode_rewards"], dtype=np.float32)
+        value_loss = np.asarray(self.training_history["value_loss"], dtype=np.float32)
+        policy_loss = np.asarray(self.training_history["policy_loss"], dtype=np.float32)
+        entropy = np.asarray(self.training_history["dist_entropy"], dtype=np.float32)
+
+        fig, axes = plt.subplots(2, 1, figsize=(10, 8), dpi=120, sharex=True)
+
+        axes[0].plot(steps, reward, color="#1f77b4", alpha=0.35, label="Reward raw")
+        reward_ma = self._moving_average(reward, self.plot_smooth_window)
+        axes[0].plot(steps, reward_ma, color="#1f77b4", linewidth=2.0, label=f"Reward MA({self.plot_smooth_window})")
+        axes[0].set_ylabel("Average Episode Reward")
+        axes[0].set_title("Training Reward Curve")
+        axes[0].grid(alpha=0.3)
+        axes[0].legend(loc="best")
+
+        axes[1].plot(steps, value_loss, color="#d62728", alpha=0.4, label="Value loss")
+        axes[1].plot(steps, policy_loss, color="#2ca02c", alpha=0.4, label="Policy loss")
+        axes[1].plot(steps, entropy, color="#9467bd", alpha=0.4, label="Entropy")
+        axes[1].plot(
+            steps,
+            self._moving_average(value_loss, self.plot_smooth_window),
+            color="#d62728",
+            linewidth=1.8,
+            label=f"Value MA({self.plot_smooth_window})",
+        )
+        axes[1].plot(
+            steps,
+            self._moving_average(policy_loss, self.plot_smooth_window),
+            color="#2ca02c",
+            linewidth=1.8,
+            label=f"Policy MA({self.plot_smooth_window})",
+        )
+        axes[1].set_xlabel("Environment Steps")
+        axes[1].set_ylabel("Loss / Entropy")
+        axes[1].set_title("Network Loss Indicators")
+        axes[1].grid(alpha=0.3)
+        axes[1].legend(loc="best")
+
+        fig.tight_layout()
+        fig_path = os.path.join(self.plot_dir, "training_curves.png")
+        fig.savefig(fig_path)
+        plt.close(fig)
+        print(f"Saved training curves to: {fig_path}")
+        print(f"Saved training metrics csv to: {history_csv_path}")

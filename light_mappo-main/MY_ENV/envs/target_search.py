@@ -110,19 +110,39 @@ class SensorAgent:
 
 
 class TargetSearchEnv(gym.Env):
-    def __init__(self, x_min=-1000, x_max=1000, y_min=-1000, y_max=1000, n_agent=3, n_target=5, max_steps=100):
+    def __init__(
+        self,
+        x_min=-2000,
+        x_max=2000,
+        y_min=-2000,
+        y_max=2000,
+        n_agent=4,
+        n_target=6,
+        max_steps=100,
+        easy_1v1=False,
+        curriculum_stage=1,
+    ):
         # --- 1. 环境基础参数 ---
         self.x_min = x_min
         self.x_max = x_max
         self.y_min = y_min
         self.y_max = y_max
+        self.curriculum_stage = int(curriculum_stage)
+        self.easy_1v1 = bool(easy_1v1)
         self.n_agents = n_agent
+        self.active_n_agents = n_agent
         self.n_targets = n_target
         self.max_steps = max_steps
+        self._apply_curriculum_structure()
 
         self.base_model_params = model()
+        if self.easy_1v1:
+            # 简化单机场景：阶段1按课程设定使用更小视域半径，其他 easy_1v1 保持更宽松配置
+            self.base_model_params["obverser_d"] = 100.0 if self.curriculum_stage == 1 else 500.0
+            self.base_model_params["Pd"] = 0.99
+            self.base_model_params["Zr"] = 1
         self.sensor_r = self.base_model_params["obverser_d"]  # 视域半径 d
-        self.agent_v = 10.0  # 智能体恒定速率 v (假设值，需根据实际情况调整)
+        self.agent_v = 20.0  # 智能体恒定速率 v (假设值，需根据实际情况调整)
 
         # 初始化融合中心（统一使用 fusion_center 命名）
         self.fusion_center = AGMFusionCenter(self.base_model_params)
@@ -172,23 +192,19 @@ class TargetSearchEnv(gym.Env):
         ])
 
         # 奖励因子 (公式 29)
-        self.lambda1 = 1.0  # r_track
-        self.lambda2 = 2.0  # r_new
+        self.lambda1 = 1  # r_track
+        self.lambda2 = 1000  # r_new
+        self.new_reward_alpha = 10  # r_new = alpha * N_k
         self.lambda3 = 0.5  # r_overlap
-        self.lambda4 = 0.5  # r_bound
-        self.rho_star = 0.1 # 理想重叠率
+        self.lambda4 = 5  # r_bound（略微提高边界惩罚权重）
         self.delta_overlap = 1.0 # 重叠奖励权重
-        # 跟踪项稳健化参数：防止协方差大时出现极端负奖励，诱导“放弃跟踪”
-        self.track_beta = 1.0
-        self.track_cov_scale = 2.0
-        self.max_cov_trace_for_reward = 4000.0
+        # 论文中的 r_track 系数 beta
+        self.track_beta = 1000
         # 调试输出控制
-        self.enable_position_debug = True
+        self.enable_position_debug = False
         self.position_debug_interval = 10
-        
-        # 历史基数记录 (用于 r_new)
-        self.history_window = 5
-        self.cardinality_history = {i: [] for i in range(self.n_agents)}
+        self._apply_curriculum_rewards()
+        self.last_reward_terms = [{} for _ in range(self.n_agents)]
 
         # 初始化变量
         self.state = None
@@ -200,10 +216,87 @@ class TargetSearchEnv(gym.Env):
         self.total_reward = None
         self.done = None
 
+    def _apply_curriculum_structure(self):
+        """按课程阶段覆盖地图大小与实体数量。stage=0 时不覆盖。"""
+        if self.curriculum_stage <= 0:
+            if self.easy_1v1:
+                self.active_n_agents = 1
+                self.n_targets = 1
+            return
+
+        if self.curriculum_stage == 1:
+            self.easy_1v1 = True
+            self.active_n_agents = 1
+            self.n_targets = 1
+            self.x_min, self.x_max = -150, 150
+            self.y_min, self.y_max = -150, 150
+        elif self.curriculum_stage == 2:
+            self.active_n_agents = 1
+            self.n_targets = 2
+            self.x_min, self.x_max = -600, 600
+            self.y_min, self.y_max = -600, 600
+        elif self.curriculum_stage == 3:
+            self.active_n_agents = min(2, self.n_agents)
+            self.n_targets = 1
+            self.x_min, self.x_max = -600, 600
+            self.y_min, self.y_max = -600, 600
+        elif self.curriculum_stage == 4:
+            self.active_n_agents = min(2, self.n_agents)
+            self.n_targets = 2
+            self.x_min, self.x_max = -600, 600
+            self.y_min, self.y_max = -600, 600
+        elif self.curriculum_stage == 5:
+            # 保持外部传入规模，恢复完整任务惩罚项
+            self.active_n_agents = self.n_agents
+
+    def _apply_curriculum_rewards(self):
+        """按课程阶段覆盖奖励参数。stage=0 时保持默认值。"""
+        if self.curriculum_stage <= 0:
+            return
+
+        if self.curriculum_stage == 1:
+            self.lambda3 = 0.0
+            self.lambda4 = 0.0
+        elif self.curriculum_stage == 2:
+            self.lambda2 = 2.5
+            self.lambda3 = 0.0
+            self.lambda4 = 1.2
+        elif self.curriculum_stage == 3:
+            self.lambda3 = 0.0
+            self.lambda4 = 1.0
+        elif self.curriculum_stage == 4:
+            # 轻微惩罚视域重叠，鼓励分工覆盖
+            self.delta_overlap = -0.5
+            self.lambda3 = 1.0
+            self.lambda2 = 2.0
+        elif self.curriculum_stage == 5:
+            # 最终课程阶段恢复完整多项奖励权重（保持默认值）
+            pass
+
+    def _sample_stage1_target_start(self):
+        """阶段1目标初始位置：80%在视域内，20%在视域外。"""
+        center_x, center_y = 0.0, 0.0
+        inside_spawn = np.random.rand() < 0.8
+        map_half_extent = min(self.x_max - center_x, center_x - self.x_min, self.y_max - center_y, center_y - self.y_min)
+        map_half_extent = max(map_half_extent, self.sensor_r * 1.2)
+
+        if inside_spawn:
+            radius = np.random.uniform(0.0, self.sensor_r * 0.95)
+        else:
+            radius = np.random.uniform(self.sensor_r * 1.05, map_half_extent * 0.95)
+
+        angle = np.random.uniform(-np.pi, np.pi)
+        x = center_x + radius * np.cos(angle)
+        y = center_y + radius * np.sin(angle)
+        vx = np.random.uniform(-7.0, 7.0)
+        vy = np.random.uniform(-7.0, 7.0)
+        return np.array([x, vx, y, vy], dtype=np.float64)
+
     def reset(self):
         self.step_count = 0
         self.done = False
         self.total_reward = [0.0 for _ in range(self.n_agents)]
+        self.last_reward_terms = [{} for _ in range(self.n_agents)]
         
         # 1. 初始化目标和传感器物理状态
         self.trajectories = self._init_targets()
@@ -230,6 +323,9 @@ class TargetSearchEnv(gym.Env):
         # 3. 最后生成观测（此时 self.state, self.agent_pos 等均已就绪）
         return self._get_observations()
 
+    def _is_agent_active(self, agent_i):
+        return agent_i < self.active_n_agents
+
     def seed(self, seed=None):
         if seed is None:
             seed = np.random.randint(0, 2**31 - 1)
@@ -246,6 +342,8 @@ class TargetSearchEnv(gym.Env):
 
         # 1. 智能体运动更新 (Section 2-4)
         for i in range(self.n_agents):
+            if not self._is_agent_active(i):
+                continue
             # --- 动作解析 ---
             action_in = actions[i]
             if hasattr(action_in, 'shape') and len(action_in.shape) > 0 and action_in.size > 1:
@@ -273,6 +371,11 @@ class TargetSearchEnv(gym.Env):
         sensor_configs = []
 
         for i, agent in enumerate(self.tracking_agents):
+            if not self._is_agent_active(i):
+                local_estimates_list.append([[], [], [], 0])
+                sensor_configs.append({'x': self.agent_pos[i][0], 'y': self.agent_pos[i][1], 'range': 0.0})
+                self.state[i] = [[], [], [], 0]
+                continue
             curr_x = self.agent_pos[i][0]
             curr_y = self.agent_pos[i][1]
             curr_heading = self.agent_headings[i]
@@ -311,7 +414,11 @@ class TargetSearchEnv(gym.Env):
         # R = lambda1 * r_track + lambda2 * r_new + lambda3 * r_overlap + lambda4 * r_bound
         per_agent_reward = []
         for i in range(self.n_agents):
-            reward_i = self._compute_reward(i, self.state[i])
+            if not self._is_agent_active(i):
+                reward_i = 0.0
+                self.last_reward_terms[i] = {'total': 0.0, 'inactive': 1.0}
+            else:
+                reward_i = self._compute_reward(i, self.state[i])
             per_agent_reward.append(reward_i)
 
         # =======================================================
@@ -325,7 +432,9 @@ class TargetSearchEnv(gym.Env):
             self.total_reward[i] += per_agent_reward[i]
             dones.append(episode_done)
             infos.append({
-                'reward': per_agent_reward[i]
+                'reward': per_agent_reward[i],
+                'reward_terms': self.last_reward_terms[i],
+                'is_active': self._is_agent_active(i)
             })
 
         self._debug_print_positions()
@@ -338,6 +447,15 @@ class TargetSearchEnv(gym.Env):
         obs_n = []
         share_obs_n = []
         for i in range(self.n_agents):
+            if not self._is_agent_active(i):
+                local_grid = np.zeros((self.grid_U, self.grid_V, self.grid_C), dtype=np.float32)
+                obs = {
+                    'polar_grid': local_grid,
+                    'self_state': np.zeros((3,), dtype=np.float32),
+                }
+                obs_n.append(obs)
+                share_obs_n.append(np.zeros((self.grid_U * self.grid_V * self.grid_C + 3,), dtype=np.float32))
+                continue
             # Actor: 看局部反馈结果
             local_grid = self._build_polar_grid(self.state[i], self.agent_pos[i], self.agent_headings[i])
             
@@ -441,100 +559,107 @@ class TargetSearchEnv(gym.Env):
         R = lambda1 * r_track + lambda2 * r_new + lambda3 * r_overlap + lambda4 * r_bound
         """
         weights, _, covs, _ = phd_state
-        # 奖励中的基数估计使用权重和，避免把分量个数误当目标数
-        n_est = float(sum(weights)) if weights else 0.0
-        
-        # 1. 跟踪精度奖励 r_track (公式 13)
-        # r_track = - sum(tr(P)) + beta * (N_k+1 - N_k)
-        weighted_trace_sum = 0.0
-        weight_sum = 0.0
-        for w, P in zip(weights, covs):
-            # P 对应状态 [x, vx, y, vy]，位置协方差迹为 P_xx + P_yy
-            # 用权重加权，避免大量低权重虚警分量把惩罚无限拉大
-            trace_pos = max(0.0, float(P[0, 0] + P[2, 2]))
-            w_eff = max(0.0, float(w))
-            weighted_trace_sum += w_eff * trace_pos
-            weight_sum += w_eff
+        # 目标基数估计 N_k：按 PHD 权重和估计
+        n_est = float(sum(weights)) if len(weights) > 0 else 0.0
 
-        avg_trace = weighted_trace_sum / (weight_sum + 1e-6)
-        # 对协方差惩罚做压缩，降低极端负值对策略的主导作用
-        cov_penalty = np.log1p(min(avg_trace, self.max_cov_trace_for_reward))
-        
-        prev_N = self.cardinality_history[agent_i][-1] if self.cardinality_history[agent_i] else 0
-        delta_N = n_est - prev_N
-        r_track = -self.track_cov_scale * cov_penalty + self.track_beta * delta_N
-        
-        # 2. 新目标发现奖励 r_new (公式 24)
-        # r_new = alpha * N_k, if N_k > max{N_{k-L}, ..., N_{k-1}}, else 0
-        history_max = max(self.cardinality_history[agent_i]) if self.cardinality_history[agent_i] else 0
-        alpha = 1.0
-        r_new = 0.0
-        if n_est > history_max:
-            r_new = alpha * n_est
-        
-        # 更新历史
-        self.cardinality_history[agent_i].append(n_est)
-        if len(self.cardinality_history[agent_i]) > self.history_window:
-            self.cardinality_history[agent_i].pop(0)
+        # 1) 跟踪精度奖励 (论文式)
+        # r_track = -sum_i tr(W P_i W^T) + beta * N_k
+        # 这里 tr(W P W^T) 对应位置协方差迹 P_xx + P_yy
+        cov_trace_sum = 0.0
+        for P in covs:
+            cov_trace_sum += max(0.0, float(P[0, 0] + P[2, 2]))
+        if n_est <= 1e-8:
+            # Empty estimate set: avoid division by zero and keep reward finite.
+            r_track = 0.0
+        else:
+            r_track = -(cov_trace_sum / n_est) + self.track_beta * n_est
 
-        # 3. 视域重叠度奖励 r_overlap (公式 26, 27)
+        # 2) 新目标发现奖励 (论文式)
+        # r_new = alpha * N_k
+        r_new = self.new_reward_alpha * n_est
+
+        # 3) 视域重叠度奖励 (论文式)
         # rho_i = |F_i ∩ (U_j F_j)| / |F_i|, r_overlap = delta * rho_i
         current_pos = self.agent_pos[agent_i]
         d = self.sensor_r
-        area_i = np.pi * d**2
+        area_i = np.pi * (d ** 2)
         overlap_union_area = 0.0
 
         for j in range(self.n_agents):
             if agent_i == j:
+                continue
+            if not self._is_agent_active(j):
                 continue
             other_pos = self.agent_pos[j]
             dist = np.linalg.norm(current_pos - other_pos)
             
             # 计算两个圆的重叠面积
             if dist >= 2 * d:
-                overlap_area = 0
+                overlap_area = 0.0
             else:
                 # 圆重叠面积公式
                 angle1 = 2 * np.arccos(dist / (2 * d))
-                overlap_area = d**2 * (angle1 - np.sin(angle1))
+                overlap_area = (d ** 2) * (angle1 - np.sin(angle1))
             overlap_union_area += overlap_area
 
         # 对并集近似做上界截断，避免重复叠加导致超过自身面积
         rho_i = min(overlap_union_area, area_i) / area_i if area_i > 0 else 0.0
         r_overlap = self.delta_overlap * rho_i
 
-        # 4. 边界惩罚 r_bound (公式 28)
+        # 4) 边界惩罚 (论文式)
+        # r_bound = -0.5 * (d - d_ib) / d, if d_ib <= d else 0
         # 计算到最近边界的距离
         x, y = current_pos
         d_ib = min(x - self.x_min, self.x_max - x, y - self.y_min, self.y_max - y)
-        d_sensor = self.sensor_r
-        
-        if d_ib <= d_sensor:
-            r_bound = -0.5 * (d_sensor - d_ib) / d_sensor
+        if d_ib <= d:
+            r_bound = -0.5 * (d - d_ib) / d
         else:
-            r_bound = 0
-            
-        # 总奖励 (公式 29)
-        total_reward = (self.lambda1 * r_track + 
-                        self.lambda2 * r_new + 
-                        self.lambda3 * r_overlap + 
-                        self.lambda4 * r_bound)
-                        
-                # 在 _compute_reward 函数末尾添加：
-        if self.step_count % 10 == 0:  # 每10步打印一次看看
-            print(f"Agent {agent_i} | Total: {total_reward:.2f} | "
-                f"Track: {r_track:.2f} | New: {r_new:.2f} | "
-                f"Overlap: {r_overlap:.2f} | Bound: {r_bound:.2f} | Est_N: {n_est}")
-            
+            r_bound = 0.0
+
+        # 总奖励 (论文式组合)
+        total_reward = (
+            self.lambda1 * r_track
+            + self.lambda2 * r_new
+            + self.lambda3 * r_overlap
+            + self.lambda4 * r_bound
+        )
+        self.last_reward_terms[agent_i] = {
+            'track': float(r_track),
+            'n_est': float(n_est),
+            'new': float(r_new),
+            'overlap': float(r_overlap),
+            'bound': float(r_bound),
+            'total': float(total_reward),
+        }
+
         return total_reward
 
     def _init_targets(self):
+        if self.easy_1v1:
+            targets_birth_time = [0]
+            targets_death_time = [self.max_steps]
+            if self.curriculum_stage == 1:
+                # 阶段1采用随机出生：80%在视域内，20%在视域外
+                targets_start = [self._sample_stage1_target_start()]
+            else:
+                targets_start = [np.array([120.0, 2.0, 40.0, 1.0], dtype=np.float64)]
+            dummy_model = model()
+            dummy_model['num_scans'] = self.max_steps
+            dummy_model['surveillance_region'] = np.array([[self.x_min, self.x_max], [self.y_min, self.y_max]])
+            trajectories, _ = target_CV(
+                dummy_model, targets_birth_time, targets_death_time, targets_start, noise=True
+            )
+            return trajectories
+
         # 封装 target_model 中的初始化逻辑
-        targets_birth_time, targets_death_time, targets_start = targets(self.max_steps)
+        targets_birth_time, targets_death_time, targets_start = targets(
+            self.max_steps, n_target=self.n_targets
+        )
         # 注意: target_CV 的 model 参数传递
         # 这里由于 target_CV 内部使用了 model['num_scans'] 等，需确保匹配
         dummy_model = model()
         dummy_model['num_scans'] = self.max_steps
+        dummy_model['surveillance_region'] = np.array([[self.x_min, self.x_max], [self.y_min, self.y_max]])
         trajectories, _ = target_CV(
             dummy_model, targets_birth_time, targets_death_time, targets_start, noise=True
         )
@@ -548,14 +673,19 @@ class TargetSearchEnv(gym.Env):
             - x, y: 坐标 (米)
             - heading: 朝向 (弧度, [-pi, pi])
         """
+        if self.easy_1v1:
+            sensor_states = np.zeros((self.n_agents, 3), dtype=np.float32)
+            sensor_states[0] = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+            if self.n_agents > 1:
+                sensor_states[1:, 0] = np.random.uniform(self.x_min, self.x_max, self.n_agents - 1)
+                sensor_states[1:, 1] = np.random.uniform(self.y_min, self.y_max, self.n_agents - 1)
+                sensor_states[1:, 2] = np.random.uniform(-np.pi, np.pi, self.n_agents - 1)
+            return sensor_states
+
         # 模式 1: 训练时使用随机初始化 (Training Mode)
-        # 假设地图范围是 [-2000, 2000]，你可以根据 args.map_size 修改
-        limit = 2000.0 
-        
         # 1. 生成随机位置 (x, y)
-        # 这里全图随机，你也可以限制在某个“起飞区”（例如 x < -1000）
-        pos_x = np.random.uniform(-limit, limit, self.n_agents)
-        pos_y = np.random.uniform(-limit, limit, self.n_agents)
+        pos_x = np.random.uniform(self.x_min, self.x_max, self.n_agents)
+        pos_y = np.random.uniform(self.y_min, self.y_max, self.n_agents)
         
         # 2. 生成随机朝向 (heading) -> [-pi, pi]
         heading = np.random.uniform(-np.pi, np.pi, self.n_agents)
@@ -723,6 +853,8 @@ class TargetSearchEnv(gym.Env):
 
         print(f"[Step {self.step_count}] Sensor and target positions")
         for i in range(self.n_agents):
+            if not self._is_agent_active(i):
+                continue
             sx, sy = self.agent_pos[i][0], self.agent_pos[i][1]
             shead = self.agent_headings[i]
             print(f"  Sensor {i}: x={sx:.1f}, y={sy:.1f}, heading={shead:.2f} rad")

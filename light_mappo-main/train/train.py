@@ -38,11 +38,13 @@ from MY_ENV.envs.my_wrappers import FlattenObservation
 def make_train_env(all_args):
     def get_env_fn(rank):
         def init_env():
+            curriculum_stage = all_args.curriculum_stage if all_args.use_curriculum else 0
 
             if all_args.env_name == "MyEnv":
                 env = TargetSearchEnv(
                     n_agent=all_args.num_agents,
                     max_steps=all_args.episode_length,
+                    curriculum_stage=curriculum_stage,
                     # 如果需要，这里可以传入更多参数，如 x_min, x_max 等
                 )
                 env = FlattenObservation(env)
@@ -64,11 +66,13 @@ def make_train_env(all_args):
 def make_eval_env(all_args):
     def get_env_fn(rank):
         def init_env():
+            curriculum_stage = all_args.curriculum_stage if all_args.use_curriculum else 0
             if all_args.env_name == "MyEnv":
                 # [修改] 实例化评估环境
                 env = TargetSearchEnv(
                     n_agent=all_args.num_agents,
-                    max_steps=all_args.episode_length
+                    max_steps=all_args.episode_length,
+                    curriculum_stage=curriculum_stage,
                 )
                 env = FlattenObservation(env)
             else:
@@ -177,7 +181,7 @@ def main(args):
     if all_args.use_centralized_V:
         obs_dim = envs.observation_space[0].shape[0] 
         num_agents = all_args.num_agents
-        expected_share_dim = obs_dim * num_agents
+        expected_share_dim = (obs_dim + 1) * num_agents
         actual_share_dim = envs.share_observation_space[0].shape[0]
         assert actual_share_dim == expected_share_dim, (
             f"share_obs_dim mismatch: got {actual_share_dim}, expected {expected_share_dim}"
@@ -208,15 +212,23 @@ def main(args):
         from runner.separated.env_runner import EnvRunner as Runner
 
     runner = Runner(config)  #这里config里面是有一个实例化的对象envs和eval_envs的，初始化runner
-    runner.run()             #实际采数据、交互
-
-    # post process
-    envs.close()
-    if all_args.use_eval and eval_envs is not envs:
-        eval_envs.close()
-
-    runner.writter.export_scalars_to_json(str(runner.log_dir + "/summary.json"))
-    runner.writter.close()
+    try:
+        runner.run()             #实际采数据、交互
+    except KeyboardInterrupt:
+        print("\n[Train] 训练被用户中断 (Ctrl+C)，将尝试根据已有数据绘图...")
+    except Exception as e:
+        print(f"\n[Train] 训练异常终止: {e}")
+        raise
+    finally:
+        # 无论正常结束还是中断，都尝试绘图（如有已记录的指标）
+        if hasattr(runner, "plot_training_curves"):
+            runner.plot_training_curves()
+        # post process
+        envs.close()
+        if all_args.use_eval and eval_envs is not envs:
+            eval_envs.close()
+        runner.writter.export_scalars_to_json(str(runner.log_dir + "/summary.json"))
+        runner.writter.close()
 
 
 if __name__ == "__main__":

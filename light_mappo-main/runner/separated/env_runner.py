@@ -96,6 +96,11 @@ class EnvRunner(Runner):
                                 * self.episode_length
                             }
                         )
+                avg_episode_reward = float(
+                    np.mean([np.mean(self.buffer[agent_id].rewards) for agent_id in range(self.num_agents)])
+                    * self.episode_length
+                )
+                self.record_training_metrics(train_infos, total_num_steps, avg_episode_reward)
                 self.log_train(train_infos, total_num_steps)
 
             # eval

@@ -71,6 +71,7 @@ class FlattenObservation(gym.ObservationWrapper):
         self.grid_dim = np.prod(self.grid_shape)
         self.state_dim = np.prod(self.state_shape)
         self.total_dim = self.grid_dim + self.state_dim
+        self.max_agents = env.n_agents
         
         # 定义新的平铺观测空间
         self.observation_space = []
@@ -84,8 +85,8 @@ class FlattenObservation(gym.ObservationWrapper):
                 )
             )
 
-        # Critic 输入约定：拼接所有智能体的局部扁平观测
-        self.share_total_dim = self.total_dim * env.n_agents
+        # Critic 输入约定：拼接 [obs_i, active_mask_i]，总维度 (obs_dim + 1) * max_agents
+        self.share_total_dim = (self.total_dim + 1) * self.max_agents
 
         self.share_observation_space = []
         for _ in range(env.n_agents):

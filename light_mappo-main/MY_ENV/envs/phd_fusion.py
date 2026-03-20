@@ -8,8 +8,9 @@ class AGMFusionCenter:
     """
     def __init__(self, model_params):
         self.model_params = model_params
-        self.T_merge = 40.0   # 合并/匹配阈值 (马氏距离)
+        self.T_merge = float(model_params.get("fusion_t_merge", 40.0))   # 合并/匹配阈值 (马氏距离)
         self.Jmax = 100       # 最大目标数限制
+        self.unmatched_part2_scale = float(model_params.get("fusion_unmatched_scale", 0.5))
         
     def run(self, list_of_local_phds, sensor_configs):
         """按 Matlab 版序贯 AGM 逻辑进行集中融合。"""
@@ -80,7 +81,8 @@ class AGMFusionCenter:
             for k in range(len(W2)):
                 if np.any(mat_match[:, k] == 1):
                     continue
-                W_new.append(W2[k])
+                # 对未匹配新分量保守并入，抑制多传感器重复计数导致的基数偏高。
+                W_new.append(self.unmatched_part2_scale * W2[k])
                 M_new.append(M2[k])
                 P_new.append(P2[k])
 

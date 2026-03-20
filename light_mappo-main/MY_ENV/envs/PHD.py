@@ -15,25 +15,37 @@ def generate(z_lastD, nums_z_lastD, z_nowD, nums_z_nowD, Vx_thre, Vy_thre):
     P_new = []
     Vx_max = 6
     Vy_max = 6
+    if nums_z_lastD == 0 or nums_z_nowD == 0:
+        return np.array([]), np.array([]), np.array([]), 0
 
     # 先将 list[array([x, y])] 转换为 2×N 数组
     z_lastD = np.array(z_lastD).T  # shape: (2, nums_z_lastD)
     z_nowD = np.array(z_nowD).T    # shape: (2, nums_z_nowD)
 
+    # 使用一对一门控匹配生成 birth，避免全组合导致基数系统性偏高。
+    candidates = []
     for i in range(nums_z_nowD):
         for j in range(nums_z_lastD):
-            z_delta = z_nowD[:,i] - z_lastD[:,j]  #得到的是一个目标的位置变化量 [delta_x, delta_y]
+            z_delta = z_nowD[:, i] - z_lastD[:, j]
             if abs(z_delta[0]) < Vx_thre and abs(z_delta[1]) < Vy_thre:
-                # x轴速度赋值
-                vx = Vx_max if abs(z_delta[0]) > Vx_max and z_delta[0] >= 0 else \
-                     -Vx_max if abs(z_delta[0]) > Vx_max and z_delta[0] < 0 else z_delta[0]
-                # y轴速度赋值
-                vy = Vy_max if abs(z_delta[1]) > Vy_max and z_delta[1] >= 0 else \
-                     -Vy_max if abs(z_delta[1]) > Vy_max and z_delta[1] < 0 else z_delta[1]
-                m = [z_nowD[0, i], vx, z_nowD[1, i], vy]
-                m_new.append(m)
-                w_new.append(0.2)
-                P_new.append(np.diag([1000, 100, 1000, 100]))
+                dist2 = float(z_delta[0] ** 2 + z_delta[1] ** 2)
+                candidates.append((dist2, i, j, z_delta[0], z_delta[1]))
+
+    candidates.sort(key=lambda x: x[0])
+    used_now = set()
+    used_last = set()
+    for _, i, j, dx, dy in candidates:
+        if i in used_now or j in used_last:
+            continue
+        used_now.add(i)
+        used_last.add(j)
+
+        vx = Vx_max if abs(dx) > Vx_max and dx >= 0 else -Vx_max if abs(dx) > Vx_max and dx < 0 else dx
+        vy = Vy_max if abs(dy) > Vy_max and dy >= 0 else -Vy_max if abs(dy) > Vy_max and dy < 0 else dy
+        m = [z_nowD[0, i], vx, z_nowD[1, i], vy]
+        m_new.append(m)
+        w_new.append(0.08)
+        P_new.append(np.diag([1000, 100, 1000, 100]))
 
     # 转为numpy数组
     w_new = np.array(w_new)
@@ -79,33 +91,15 @@ def UKFpart(X_fusion_pre, P_fusion_pre, R, x_radar, y_radar):
         w_p[i + 1] = 1 / (2 * (n_num + lam))
               
     #计算撒点的观测值
-    for i in range(2 * n_num + 1):    
-        Z_ob_diffusion[i, 0] = np.sqrt((X_pre_diffusion[i, 0] - x_radar) ** 2 + (X_pre_diffusion[i, 2] - y_radar) ** 2)  #距离
-        theta_sus_head = np.rad2deg(
-            np.arctan2((X_pre_diffusion[i, 2] - y_radar), (X_pre_diffusion[i, 0] - x_radar))
-        )
+    for i in range(2 * n_num + 1):
+        dx = X_pre_diffusion[i, 0] - x_radar
+        dy = X_pre_diffusion[i, 2] - y_radar
+        Z_ob_diffusion[i, 0] = np.sqrt(dx ** 2 + dy ** 2)  # 距离
+        # atan2 已含象限信息，统一到 [0, 360)
+        Z_ob_diffusion[i, 1] = (np.rad2deg(np.arctan2(dy, dx)) + 360.0) % 360.0
 
-        if np.logical_and(X_pre_diffusion[i, 0] - x_radar >= 0, X_pre_diffusion[i, 2] - y_radar >= 0):
-            Z_ob_diffusion[i, 1] = theta_sus_head
-        elif np.logical_and(X_pre_diffusion[i, 0] - x_radar < 0, X_pre_diffusion[i, 2] - y_radar >= 0):
-            Z_ob_diffusion[i, 1] = theta_sus_head + 180
-        elif np.logical_and(X_pre_diffusion[i, 0] - x_radar < 0, X_pre_diffusion[i, 2] - y_radar < 0):
-            Z_ob_diffusion[i, 1] = theta_sus_head + 180
-        elif np.logical_and(X_pre_diffusion[i, 0] - x_radar >= 0, X_pre_diffusion[i, 2] - y_radar < 0):
-            Z_ob_diffusion[i, 1] = theta_sus_head + 360
-
+    # 角度跳变由更新阶段 wrap 统一处理。
     flag_jump = 0
-    max_theta = 0
-    for i in range(1 , 2 * n_num + 1):
-        d_theta = abs(Z_ob_diffusion[0, 1] - Z_ob_diffusion[i, 1])
-        if d_theta > max_theta:
-            max_theta = d_theta
-    
-    if max_theta > 180:
-        for i in range(2 * n_num + 1):
-            if Z_ob_diffusion[i, 1] > 270:
-                Z_ob_diffusion[i, 1] = Z_ob_diffusion[i, 1] - 360
-        flag_jump = 1
 
     Z_fusion_ob = np.zeros(2, dtype=float)
 
@@ -145,22 +139,11 @@ def M_UKF(X_fusion_pre, Z_polar, Z_fusion_ob, k_ukf, flag_jump):
     - X_ukf: 更新后的状态
     """
    
-    complement = np.array([0.0, 360.0]).reshape(2, 1)
     Z_polar = Z_polar.reshape(2, 1)
     Z_fusion_ob = Z_fusion_ob.reshape(2, 1)
-    angle_obs = Z_polar[1, 0]    # 第2行第1列
-    angle_pred = Z_fusion_ob[1, 0]
-    delta_angle = _wrap_angle_deg(Z_polar[1, 0] - Z_fusion_ob[1, 0])
-
-    if abs(delta_angle) > 180 and flag_jump == 0:
-        if delta_angle < 0:
-            X_ukf = X_fusion_pre.reshape(4, 1) + k_ukf @ (Z_polar - Z_fusion_ob + complement)
-        else:
-            X_ukf = X_fusion_pre.reshape(4, 1) + k_ukf @ (Z_polar - (Z_fusion_ob + complement))
-    elif abs(delta_angle) > 180 and flag_jump == 1:
-        X_ukf = X_fusion_pre.reshape(4, 1) + k_ukf @ (Z_polar - (Z_fusion_ob + complement))
-    else:
-        X_ukf = X_fusion_pre.reshape(4, 1) + k_ukf @ (Z_polar - Z_fusion_ob).reshape(2, 1)
+    innovation = Z_polar - Z_fusion_ob
+    innovation[1, 0] = _wrap_angle_deg(float(innovation[1, 0]))
+    X_ukf = X_fusion_pre.reshape(4, 1) + k_ukf @ innovation
 
     X_ukf = X_ukf.flatten()
     #print(X_ukf)
@@ -172,14 +155,20 @@ def State_extraction(X_now):
     weights = X_now[0]  # 权重列表
     means = X_now[1]  # 均值列表
 
+    if len(weights) == 0:
+        return np.array(state_draw_list), 0
 
     for w, m in zip(weights, means):
-        j = min(round(w), 2)  # 限制最多复制2次
-        for _ in range(j):
+        # 采用阈值提取，避免 round(w) 带来的离散化误差。
+        if float(w) >= 0.5:
             state_draw_list.append(m)
 
+    if len(state_draw_list) == 0 and len(means) > 0:
+        best_idx = int(np.argmax(np.asarray(weights, dtype=np.float32)))
+        state_draw_list.append(means[best_idx])
+
     state_draw = np.array(state_draw_list)
-    num_draw = len(state_draw)
+    num_draw = max(0, int(round(float(np.sum(np.maximum(np.asarray(weights, dtype=np.float32), 0.0))))))
 
     return state_draw, num_draw
 
@@ -194,7 +183,7 @@ class PHD():
                         X_laxt上一时刻的全局后验分布
         """
         self.T = 1
-        self.Ps = 1
+        self.Ps = float(params.get("Ps", 0.99))
         self.Pd = params["Pd"]           #检测概率
         self.R = params["obverser_R"]    #观测误差矩阵
         self.meas_sigma_r0 = params.get("meas_sigma_r0", float(np.sqrt(self.R[0, 0])))
@@ -206,6 +195,9 @@ class PHD():
         self.x_agent = params['x_agent']
         self.y_agent = params['y_agent']
         self.Zr = params["Zr"]           #杂波强度
+        self.obverser_d = float(params.get("obverser_d", 900.0))
+        self.clutter_intensity = float(self.Zr) / max(np.pi * (self.obverser_d ** 2), 1e-6)
+        self.prune_threshold = float(params.get("phd_prune_threshold", 0.01))
         self.A = np.array([[1, self.T, 0, 0],
                             [0, 1, 0, 0],
                             [0, 0, 1, self.T],
@@ -318,8 +310,10 @@ class PHD():
                     diff = (z_now - Z_pred).reshape(-1)
                     diff[1] = _wrap_angle_deg(diff[1])
 
-                    exponent = -0.5 * diff @ np.linalg.inv(Pz_j) @ diff
-                    denom = 2 * np.pi * np.sqrt(np.linalg.det(Pz_j))
+                    inv_pz = np.linalg.pinv(Pz_j)
+                    exponent = -0.5 * diff @ inv_pz @ diff
+                    det_pz = max(float(np.linalg.det(Pz_j)), 1e-12)
+                    denom = 2 * np.pi * np.sqrt(det_pz)
                     likelihood = np.exp(exponent) / denom
 
                     # 权重更新
@@ -334,19 +328,19 @@ class PHD():
                 start_idx = J_pre + (e - 1) * J_pre
                 end_idx = J_pre + e * J_pre
                 updated_weights = w_pos[start_idx:end_idx]
-                if max(updated_weights) <= 1e-8:
+                if len(updated_weights) == 0 or max(updated_weights) <= 1e-8:
                     w_pos[start_idx:end_idx] = [0] * J_pre
                 else:
                     w_sum = sum(updated_weights)
         
-                    updated_weights = [self.Pd * w / ((self.Zr / (900**2)) + w_sum) for w in updated_weights]
+                    updated_weights = [self.Pd * w / (self.clutter_intensity + w_sum) for w in updated_weights]
                     w_pos[start_idx:end_idx] = updated_weights
 
             J_pos = e * J_pre + J_pre  #存疑
 
 
             # ------- 剪枝 -------
-            T = 0.2 * (1 - self.Pd) * 0.99 + 1e-5
+            T = max(self.prune_threshold, 0.2 * (1 - self.Pd) * 0.99 + 1e-5)
             W_select, M_select, P_select = [], [], []
             #k = 0
             for i in range(J_pos):
